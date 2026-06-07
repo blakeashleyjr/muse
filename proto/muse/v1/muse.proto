@@ -7,74 +7,58 @@
 syntax = "proto3";
 package muse.v1;
 
-service MuseService {
-  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
-  rpc NewContext(NewContextRequest) returns (NewContextResponse);
-  rpc CloseContext(CloseContextRequest) returns (CloseContextResponse);
-  rpc Spawn(SpawnRequest) returns (SpawnResponse);
-  rpc Write(WriteRequest) returns (WriteResponse);
-  rpc Key(KeyRequest) returns (KeyResponse);
-  rpc Mouse(MouseRequest) returns (MouseResponse);
-  rpc Resize(ResizeRequest) returns (ResizeResponse);
-  rpc Paste(PasteRequest) returns (PasteResponse);
-  rpc ResolveLocator(ResolveLocatorRequest) returns (ResolveLocatorResponse);
-  rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
-  rpc Assert(AssertRequest) returns (AssertResponse);
-  rpc SetProfile(SetProfileRequest) returns (SetProfileResponse);
-  rpc BeginStep(BeginStepRequest) returns (BeginStepResponse);
-  rpc EndStep(EndStepRequest) returns (EndStepResponse);
-  rpc StartTrace(StartTraceRequest) returns (StartTraceResponse);
-  rpc ExportTrace(ExportTraceRequest) returns (ExportTraceResponse);
-  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+service Muse {
+  rpc Handshake(HandshakeReq) returns (HandshakeResp);
+  rpc NewContext(NewContextReq) returns (ContextId);
+  rpc CloseContext(ContextId) returns (Ack);
+  rpc Spawn(SpawnReq) returns (TerminalId);
+  rpc Write(WriteReq) returns (Ack);
+  rpc Key(KeyReq) returns (Ack);
+  rpc Mouse(MouseReq) returns (Ack);
+  rpc Resize(ResizeReq) returns (Ack);
+  rpc Paste(PasteReq) returns (Ack);
+  rpc ResolveLocator(ResolveReq) returns (ResolveResp);
+  rpc Snapshot(SnapshotReq) returns (SnapshotResp);
+  rpc Assert(AssertReq) returns (AssertResp);
+  rpc SetProfile(SetProfileReq) returns (Capabilities);
+  rpc BeginStep(StepReq) returns (Ack);
+  rpc EndStep(TerminalIdMsg) returns (Ack);
+  rpc StartTrace(TraceReq) returns (Ack);
+  rpc ExportTrace(TerminalIdMsg) returns (TracePath);
+  rpc Subscribe(SubscribeReq) returns (stream Event);
 }
 
-message HandshakeRequest { uint32 protocol_version = 1; }
-message HandshakeResponse { uint32 protocol_version = 1; string engine_version = 2; }
-message NewContextRequest { string profile = 1; uint32 cols = 2; uint32 rows = 3; }
-message NewContextResponse { string id = 1; }
-message CloseContextRequest { string id = 1; }
-message CloseContextResponse {}
-message SpawnRequest {
+message Ack {}
+message HandshakeReq { uint32 protocol_version = 1; }
+message HandshakeResp { uint32 protocol_version = 1; string engine_version = 2; }
+message NewContextReq { string profile = 1; uint32 cols = 2; uint32 rows = 3; }
+message ContextId { string id = 1; }
+message SpawnReq {
   string context = 1;
   repeated string argv = 2;
   map<string, string> env = 3;
   string cwd = 4;
 }
-message SpawnResponse { string id = 1; }
+message TerminalId { string id = 1; }
+message TerminalIdMsg { string terminal = 1; }
 
-message WriteRequest { string terminal = 1; bytes data = 2; }
-message WriteResponse {}
-message PasteRequest { string terminal = 1; bytes data = 2; }
-message PasteResponse {}
-message ResizeRequest { string terminal = 1; uint32 cols = 2; uint32 rows = 3; }
-message ResizeResponse {}
+message WriteReq { string terminal = 1; bytes data = 2; }
+message PasteReq { string terminal = 1; bytes data = 2; }
+message ResizeReq { string terminal = 1; uint32 cols = 2; uint32 rows = 3; }
 
 enum SpecialKey {
-  SPECIAL_KEY_UNSPECIFIED = 0;
-  SPECIAL_KEY_ENTER = 1;
-  SPECIAL_KEY_TAB = 2;
-  SPECIAL_KEY_BACKSPACE = 3;
-  SPECIAL_KEY_ESCAPE = 4;
-  SPECIAL_KEY_UP = 5;
-  SPECIAL_KEY_DOWN = 6;
-  SPECIAL_KEY_LEFT = 7;
-  SPECIAL_KEY_RIGHT = 8;
-  SPECIAL_KEY_HOME = 9;
-  SPECIAL_KEY_END = 10;
-  SPECIAL_KEY_PAGE_UP = 11;
-  SPECIAL_KEY_PAGE_DOWN = 12;
-  SPECIAL_KEY_INSERT = 13;
-  SPECIAL_KEY_DELETE = 14;
-  SPECIAL_KEY_F = 15;
+  CHAR = 0; ENTER = 1; TAB = 2; BACKSPACE = 3; ESCAPE = 4;
+  UP = 5; DOWN = 6; LEFT = 7; RIGHT = 8;
+  HOME = 9; END = 10; PAGE_UP = 11; PAGE_DOWN = 12;
+  INSERT = 13; DELETE = 14; F = 15;
 }
 message Key {
   oneof k { string char = 1; SpecialKey special = 2; }
   uint32 fnum = 3; // for F-keys
 }
-message KeyRequest { string terminal = 1; Key key = 2; uint32 mods = 3; }
-message KeyResponse {}
+message KeyReq { string terminal = 1; Key key = 2; uint32 mods = 3; }
 
-message MouseRequest {
+message MouseReq {
   string terminal = 1;
   uint32 button = 2;   // 0=left 1=middle 2=right 64=wheel-up 65=wheel-down
   uint32 action = 3;   // 0=press 1=release 2=move
@@ -82,7 +66,6 @@ message MouseRequest {
   uint32 col = 5;
   uint32 mods = 6;
 }
-message MouseResponse {}
 
 // ---- locators -------------------------------------------------------------
 message Rect { uint32 row = 1; uint32 col = 2; uint32 w = 3; uint32 h = 4; }
@@ -102,9 +85,9 @@ message Locator {
     LineLoc line = 7;
   }
 }
-message ResolveLocatorRequest { string terminal = 1; Locator loc = 2; bool multiline = 3; uint32 deadline_ms = 4; }
+message ResolveReq { string terminal = 1; Locator loc = 2; bool multiline = 3; uint32 deadline_ms = 4; }
 message Match { Rect rect = 1; string text = 2; }
-message ResolveLocatorResponse { repeated Match matches = 1; }
+message ResolveResp { repeated Match matches = 1; }
 
 // ---- colors / style -------------------------------------------------------
 message Color {
@@ -113,7 +96,7 @@ message Color {
 message CellStyle { Color fg = 1; Color bg = 2; Color underline = 3; uint32 attrs = 4; }
 
 // ---- snapshots ------------------------------------------------------------
-message SnapshotRequest {
+message SnapshotReq {
   string terminal = 1;
   uint32 kind = 2;          // 0=text 1=styled 2=pixel
   uint32 pixel_scale = 3;
@@ -123,12 +106,12 @@ message SnapshotRequest {
 message StyleRun { uint32 start_col = 1; uint32 len = 2; CellStyle style = 3; }
 message StyledRow { string text = 1; repeated StyleRun runs = 2; }
 message StyledSnapshot { repeated StyledRow rows = 1; }
-message SnapshotResponse {
+message SnapshotResp {
   oneof s { string text = 1; StyledSnapshot styled = 2; bytes png = 3; }
 }
 
 // ---- assertions -----------------------------------------------------------
-message AssertRequest {
+message AssertReq {
   string terminal = 1;
   Locator loc = 2;
   bool multiline = 3;
@@ -136,11 +119,10 @@ message AssertRequest {
   string expected = 5;
   uint32 deadline_ms = 6;
 }
-message AssertResponse { bool ok = 1; string actual = 2; string expected = 3; string detail = 4; }
+message AssertResp { bool ok = 1; string actual = 2; string expected = 3; string detail = 4; }
 
 // ---- capabilities / profiles ----------------------------------------------
-message SetProfileRequest { string terminal = 1; string profile = 2; }
-message SetProfileResponse { Capabilities capabilities = 1; }
+message SetProfileReq { string terminal = 1; string profile = 2; }
 message Capabilities {
   string terminfo_name = 1;
   uint32 color = 2;
@@ -151,18 +133,12 @@ message Capabilities {
 }
 
 // ---- steps / trace --------------------------------------------------------
-message BeginStepRequest { string terminal = 1; string name = 2; }
-message BeginStepResponse {}
-message EndStepRequest { string terminal = 1; }
-message EndStepResponse {}
-message StartTraceRequest { string terminal = 1; string dir = 2; }
-message StartTraceResponse {}
-message ExportTraceRequest { string terminal = 1; }
-message ExportTraceResponse { string path = 1; }
+message StepReq { string terminal = 1; string name = 2; }
+message TraceReq { string terminal = 1; string dir = 2; }
+message TracePath { string path = 1; }
 
 // ---- subscribe ------------------------------------------------------------
-message SubscribeRequest { string terminal = 1; }
-message SubscribeResponse { Event event = 1; }
+message SubscribeReq { string terminal = 1; }
 message OutputChunk { bytes data = 1; double ts = 2; }
 message Frame { uint64 generation = 1; double ts = 2; }
 message Event { oneof e { OutputChunk output = 1; Frame frame = 2; } }

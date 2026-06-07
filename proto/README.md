@@ -11,7 +11,7 @@ against.
 
 | File | Role |
 |---|---|
-| `muse/v1/muse.proto` | The `MuseService` service and its RPC-specific request/response messages (Handshake, NewContext, Spawn, Write, Key, Mouse, Resize, Paste, ResolveLocator, Snapshot, Assert, SetProfile, BeginStep/EndStep, StartTrace/ExportTrace, Subscribe). |
+| `muse/v1/muse.proto` | The `Muse` service and its messages (Handshake, NewContext, Spawn, Write, Key, Mouse, Resize, Paste, ResolveLocator, Snapshot, Assert, SetProfile, BeginStep/EndStep, StartTrace/ExportTrace, Subscribe). |
 | `buf.yaml` | [buf](https://buf.build) module config — `STANDARD` lint rules and `FILE`-level breaking-change detection. |
 | `buf.gen.yaml` | Code-generation plugins and output paths for each target SDK. |
 
