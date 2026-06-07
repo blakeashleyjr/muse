@@ -3,6 +3,9 @@
 *.profraw
 /sdks/*/gen
 
+# Agent workspace artifacts
+/.hermes
+
 # OS / editor cruft
 .DS_Store
 *.swp
