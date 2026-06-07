@@ -1,6 +1,6 @@
 # muse Documentation
 
-Welcome to the `muse` documentation. 
+Welcome to the `muse` documentation.
 
 ## Contents
 

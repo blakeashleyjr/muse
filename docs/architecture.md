@@ -25,7 +25,7 @@ When executing a test spec or driving a program, data flows through the system i
 3. **State Management**: As the program outputs VT/ANSI sequences, `muse-emulator` parses them via its `vte` backend and applies the mutations to the pure screen model living in `muse-core`.
 4. **Synchronization**: Instead of relying on flaky sleeps, `muse-engine` monitors the output for quiescence. It declares a frame stable when the output is quiet or when specific synchronization markers (like DEC-2026 or `muse:ready`) are received.
 5. **Assertions**: Once a frame is stable, `muse-engine` runs web-first assertions (e.g., `expect_visible`) against the screen DOM. If an assertion fails, it retries against fresh frames until a deadline is met.
-6. **Snapshotting**: When a snapshot is requested, `muse-render` captures the current frame at the specified fidelity (text, styled, or pixel). 
+6. **Snapshotting**: When a snapshot is requested, `muse-render` captures the current frame at the specified fidelity (text, styled, or pixel).
 7. **Verification**: `muse-diff` compares the captured snapshot against the baseline on disk. Pixel snapshots are deterministic across platforms due to fixed cell metrics, a static bitmap font, and integer rasterization.
 
 ## Verification Strategy
