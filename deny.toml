@@ -32,6 +32,7 @@ confidence-threshold = 0.9
 # Warn on duplicate semver-incompatible versions of the same crate.
 multiple-versions = "warn"
 wildcards = "deny"
+skip = [{ name = "thiserror", version = "1.0" }, { name = "thiserror-impl", version = "1.0" }]
 
 [sources]
 # Only allow crates from the official registry.

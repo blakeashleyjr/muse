@@ -24,13 +24,13 @@ keywords = ["terminal", "testing", "tui", "snapshot", "vt"]
 categories = ["development-tools::testing", "command-line-utilities"]
 
 [workspace.dependencies]
-muse-core = { path = "crates/muse-core" }
-muse-emulator = { path = "crates/muse-emulator" }
-muse-render = { path = "crates/muse-render" }
-muse-trace = { path = "crates/muse-trace" }
-muse-pty = { path = "crates/muse-pty" }
-muse-diff = { path = "crates/muse-diff" }
-muse-engine = { path = "crates/muse-engine" }
+muse-core = { path = "crates/muse-core", version = "0.1.0" }
+muse-emulator = { path = "crates/muse-emulator", version = "0.1.0" }
+muse-render = { path = "crates/muse-render", version = "0.1.0" }
+muse-trace = { path = "crates/muse-trace", version = "0.1.0" }
+muse-pty = { path = "crates/muse-pty", version = "0.1.0" }
+muse-diff = { path = "crates/muse-diff", version = "0.1.0" }
+muse-engine = { path = "crates/muse-engine", version = "0.1.0" }
 
 # Shared third-party deps
 thiserror = "2"
@@ -50,7 +50,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 similar = "2"
 toml = "0.8"
 tracing = "0.1"
-muse-runner = { path = "crates/muse-runner" }
+muse-runner = { path = "crates/muse-runner", version = "0.1.0" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 
