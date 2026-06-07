@@ -1,4 +1,4 @@
-//! SVG renderer for human review (§11): cells as <rect> + <text>.
+//! SVG renderer for human review (§11): cells as `<rect>` + `<text>`.
 
 use muse_core::cell::CellKind;
 use muse_core::color::Color;
