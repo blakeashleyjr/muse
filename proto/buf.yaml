@@ -4,6 +4,16 @@ modules:
 lint:
   use:
     - STANDARD
+  # The v0.1 proto predates Buf's stricter public API naming rules and is kept
+  # stable by the breaking-change gate. Re-enable these once the P2 live
+  # server/SDK surface is intentionally versioned for a breaking v2 protocol.
+  except:
+    - SERVICE_SUFFIX
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
 breaking:
   use:
     - FILE
