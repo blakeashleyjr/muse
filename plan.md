@@ -1,4 +1,10 @@
-Proscenium — End-to-End Implementation Design Document
+Muse — End-to-End Implementation Design Document
+
+> **Historical design spec.** This is the original implementation blueprint,
+> retained for context. It was written before the codename "Proscenium" was
+> changed to "muse" (references have been updated). The shipped crate layout has
+> since diverged from §4 in places (some crates here were merged), so treat the
+> code and the [README](README.md) as authoritative where they differ.
 
 Status: implementation-ready spec • Target: a coding agent building bottom-up • Core: Rust • SDKs: generated (Go, TS/JS, Python, C++, Rust)
 
@@ -9,7 +15,7 @@ Contents
     Glossary
     Architecture & crate DAG
     Repository layout
-    pros-core domain types
+    muse-core domain types
     Emulator subsystem
     PTY subsystem
     Synchronizer (quiescence)
@@ -40,7 +46,7 @@ Goals. A black-box e2e + visual-regression testing system for terminal programs:
 
 Non-goals (v1). GUI/graphical-protocol terminals (Sixel/Kitty-graphics rendering correctness is out, though byte passthrough is in). Windows ConPTY is supported via portable-pty but is a P2 conformance target. Freezing a black-box program's wall clock without a shim (offered as opt-in libfaketime + masking, not guaranteed).
 
-Success criteria. (a) pros can run a matrix suite against a real TUI and produce deterministic pass/fail; (b) the same test source compiles/runs through ≥2 generated SDKs (Rust + Go) with identical results on the conformance corpus; (c) pixel snapshots are byte-identical across Linux and macOS CI for the embedded font.
+Success criteria. (a) muse can run a matrix suite against a real TUI and produce deterministic pass/fail; (b) the same test source compiles/runs through ≥2 generated SDKs (Rust + Go) with identical results on the conformance corpus; (c) pixel snapshots are byte-identical across Linux and macOS CI for the embedded font.
 2. Glossary
 
     SUT — system under test (the spawned terminal program).
@@ -55,56 +61,56 @@ Success criteria. (a) pros can run a matrix suite against a real TUI and produce
 
 3. Architecture & crate DAG
 
-Strict layering. pros-core is pure domain (no tokio, no proto, no I/O). Build bottom-up; a crate may only depend on crates above it in this list:
+Strict layering. muse-core is pure domain (no tokio, no proto, no I/O). Build bottom-up; a crate may only depend on crates above it in this list:
 
-pros-core            (types, traits, algorithms; no I/O, no async)
-  pros-emulator      (depends: core)            — Emulator trait + backends + profiles
-  pros-render        (depends: core)            — text/styled/pixel renderers
-  pros-diff          (depends: core, render)    — mask/normalize/perceptual
-  pros-trace         (depends: core)            — trace format + asciinema
-pros-pty             (depends: core)            — portable-pty wrapper (async via tokio)
-pros-engine-actor    (depends: all above + tokio) — Terminal actor, Session/Context mgr
-pros-proto           (depends: core)            — prost/tonic generated + From/Into mappers
-pros-engine          (depends: actor + proto)  — tonic server, request handlers
-pros-ffi             (depends: actor)           — #[no_mangle] C ABI (embedded mode)
-pros-sdk             (depends: proto)           — native Rust DSL (sugar over generated client)
-pros-runner          (depends: sdk)             — matrix, scheduling, reporters
-pros-viewer          (depends: trace, ratatui)  — TUI trace viewer
-pros-cli             (depends: engine, runner, viewer) — `pros` binary
+muse-core            (types, traits, algorithms; no I/O, no async)
+  muse-emulator      (depends: core)            — Emulator trait + backends + profiles
+  muse-render        (depends: core)            — text/styled/pixel renderers
+  muse-diff          (depends: core, render)    — mask/normalize/perceptual
+  muse-trace         (depends: core)            — trace format + asciinema
+muse-pty             (depends: core)            — portable-pty wrapper (async via tokio)
+muse-engine-actor    (depends: all above + tokio) — Terminal actor, Session/Context mgr
+muse-proto           (depends: core)            — prost/tonic generated + From/Into mappers
+muse-engine          (depends: actor + proto)  — tonic server, request handlers
+muse-ffi             (depends: actor)           — #[no_mangle] C ABI (embedded mode)
+muse-sdk             (depends: proto)           — native Rust DSL (sugar over generated client)
+muse-runner          (depends: sdk)             — matrix, scheduling, reporters
+muse-viewer          (depends: trace, ratatui)  — TUI trace viewer
+muse-cli             (depends: engine, runner, viewer) — `muse` binary
 
-Rule: protobuf types never appear above pros-proto; the engine maps proto↔domain at its boundary.
+Rule: protobuf types never appear above muse-proto; the engine maps proto↔domain at its boundary.
 4. Repository layout
 
-proscenium/
+muse/
   Cargo.toml                      # workspace
   rust-toolchain.toml             # pin toolchain (e.g. 1.79)
   proto/
-    proscenium/v1/proscenium.proto
+    muse/v1/muse.proto
     buf.yaml  buf.gen.yaml  buf.lock
   crates/
-    pros-core/        src/{lib,grid,cell,style,color,screen,modes,cursor,locator,snapshot,error,config}.rs
-    pros-emulator/    src/{lib,emulator,profile,capabilities,backend_alacritty,query,reduce_color}.rs
-    pros-render/      src/{lib,text,styled,pixel,font}.rs
+    muse-core/        src/{lib,grid,cell,style,color,screen,modes,cursor,locator,snapshot,error,config}.rs
+    muse-emulator/    src/{lib,emulator,profile,capabilities,backend_alacritty,query,reduce_color}.rs
+    muse-render/      src/{lib,text,styled,pixel,font}.rs
                       assets/font.ttf
-    pros-diff/        src/{lib,mask,normalize,perceptual,stabilize,report}.rs
-    pros-trace/       src/{lib,format,asciinema,recorder}.rs
-    pros-pty/         src/{lib,spawn,winsize,remote}.rs
-    pros-engine-actor/src/{lib,terminal,session,context,supervisor,sync}.rs
-    pros-proto/       build.rs src/{lib,map}.rs
-    pros-engine/      src/{lib,server,handlers,stream}.rs
-    pros-ffi/         cbindgen.toml src/{lib,handles,abi}.rs
-    pros-sdk/         src/{lib,test,expect,locator,terminal,matrix,reporter}.rs
-    pros-runner/      src/{lib,schedule,retry,report_junit,report_pretty}.rs
-    pros-viewer/      src/{lib,app,timeline,render_cell}.rs
-    pros-cli/         src/{main,cmd_run,cmd_serve,cmd_codegen,cmd_trace,cmd_doctor,cmd_update}.rs
+    muse-diff/        src/{lib,mask,normalize,perceptual,stabilize,report}.rs
+    muse-trace/       src/{lib,format,asciinema,recorder}.rs
+    muse-pty/         src/{lib,spawn,winsize,remote}.rs
+    muse-engine-actor/src/{lib,terminal,session,context,supervisor,sync}.rs
+    muse-proto/       build.rs src/{lib,map}.rs
+    muse-engine/      src/{lib,server,handlers,stream}.rs
+    muse-ffi/         cbindgen.toml src/{lib,handles,abi}.rs
+    muse-sdk/         src/{lib,test,expect,locator,terminal,matrix,reporter}.rs
+    muse-runner/      src/{lib,schedule,retry,report_junit,report_pretty}.rs
+    muse-viewer/      src/{lib,app,timeline,render_cell}.rs
+    muse-cli/         src/{main,cmd_run,cmd_serve,cmd_codegen,cmd_trace,cmd_doctor,cmd_update}.rs
   sdks/
     go/ ts/ python/ cpp/          # generated base + hand-written sugar
   conformance/
     emulator/*.yaml protocol/*.yaml runner.rs
-  ffi-headers/proscenium.h        # cbindgen output, checked in
+  ffi-headers/muse.h        # cbindgen output, checked in
   examples/
 
-5. pros-core domain types
+5. muse-core domain types
 
 Authoritative type definitions. Use compact_str::CompactString for graphemes, bitflags for attrs, smallvec for style runs.
 rust
@@ -170,7 +176,7 @@ impl Screen { pub fn active_grid(&self) -> &Grid; }
 // locator.rs (see §10)  snapshot.rs (see §11)  error.rs (see §21)  config.rs (see §22)
 
 Width rule (authoritative). Use unicode-width for display width; unicode-segmentation for grapheme clustering. A grapheme of width 2 writes a Glyph at column c and a Spacer at c+1. Zero-width joiners/combining marks attach to the preceding Glyph's CompactString (do not advance the column). Width-0 leading clusters are dropped.
-6. Emulator subsystem (pros-emulator)
+6. Emulator subsystem (muse-emulator)
 
 Decision: v1 wraps alacritty_terminal::Term as the single backend; profiles are a shaping layer over it (env/terminfo setup, query-response rewriting, color reduction). True divergent backends (strict VT220 quirks) are deferred to M3+. This is the tractable, correct path; do not hand-roll a screen model in v1.
 rust
@@ -205,7 +211,7 @@ pub struct Profile { pub name: &'static str, pub caps: Capabilities, pub env: &'
 Built-in profiles (M3): xterm (xterm-256color, TrueColor, ModifyOtherKeys, SGR mouse, 2026, paste), vt220 (Ansi16, Legacy kbd, no mouse, no paste, DA1=\x1b[?62;1;2;6;8;9c), kitty (TrueColor, Kitty kbd, all mouse, 2026), screen (Indexed256, no 2026), dumb (NoColor, Legacy). Color reduction (reduce_color.rs): TrueColor→256 via 6×6×6 cube + grayscale nearest; 256→16 via a fixed LUT; NoColor drops color, keeps attrs. Applied in snapshot_screen when caps.color < TrueColor.
 
 Acceptance. Feed \x1b[31mHELLO\x1b[0m → cell (0,0..5) fg=Indexed(1) under xterm; under dumb, fg=Default, text intact. Feed DA1 query \x1b[c → drain_replies() returns the profile's da1.
-7. PTY subsystem (pros-pty)
+7. PTY subsystem (muse-pty)
 
 Wrap portable_pty. Provide async read via a blocking-reader thread → tokio::sync::mpsc of Bytes (portable-pty readers are blocking; bridge with spawn_blocking or a dedicated thread). Spawn API:
 rust
@@ -223,7 +229,7 @@ impl Pty {
 }
 
 Set TERM from Profile.caps.terminfo_name, plus COLORTERM=truecolor only when TrueColor, and merge Profile.env. Process-group kill (Unix): spawn with a new session/pgid so kill(-pgid) reaps children. remote.rs (P2): same trait over an SSH/exec transport.
-8. Synchronizer (pros-engine-actor::sync)
+8. Synchronizer (muse-engine-actor::sync)
 
 Deterministic "render complete" detection. Owned by the Terminal actor. State machine:
 
@@ -237,11 +243,11 @@ Rules, evaluated on every output chunk and on a timer tick:
 
     On any output chunk: record last_activity = now; if a DEC-2026 BSU (CSI ? 2026 h) was seen and no ESU (CSI ? 2026 l) yet, set sync_open = true (suppress Stable). On ESU, clear it.
     Stable is declared when: sync_open == false AND now - last_activity >= quiet_window (default 50 ms). Emit a FrameEvent { screen, generation }.
-    Cooperative readiness: a private OSC OSC 5379 ; pros:ready ST (\x1b]5379;pros:ready\x07) declares Stable immediately for the current step (use a vendor-unique number; document it). The synchronizer recognizes it during scan and short-circuits the timer.
+    Cooperative readiness: a private OSC OSC 5379 ; muse:ready ST (\x1b]5379;muse:ready\x07) declares Stable immediately for the current step (use a vendor-unique number; document it). The synchronizer recognizes it during scan and short-circuits the timer.
     Deadline polling: locator/snapshot requests register a waiter (predicate, deadline, oneshot). On each FrameEvent (and a 10 ms safety tick), evaluate waiters; resolve on success or at deadline (returning empty/timeout).
 
 Config: quiet_window (50 ms), max_settle (cap total wait before forcing Stable, 2 s), tick (10 ms). Acceptance: a program that prints "loading" then after 30 ms prints "done" must yield a single Stable frame containing "done" with quiet_window=50ms; a program using BSU/ESU around a multi-write update must not emit an intermediate Stable.
-9. Input encoding (pros-core::input, used by actor)
+9. Input encoding (muse-core::input, used by actor)
 
 Pure functions; read ModeState from the emulator. Keys → bytes must honor mode:
 rust
@@ -254,7 +260,7 @@ pub fn encode_key(ev: &KeyEvent, modes: &ModeState, caps: &Capabilities) -> Vec<
 Encoding table (legacy mode): arrows = ESC O A/B/C/D when app_cursor_keys, else ESC [ A/B/C/D. Ctrl+Char = char & 0x1f. Alt+X = ESC + X. F1–F4 = ESC O P/Q/R/S; F5–F12 = ESC [ 15~ … 24~. Home/End/PgUp/PgDn/Ins/Del = ESC [ 1~/4~/5~/6~/2~/3~. Modified keys with ModifyOtherKeys or Kitty: emit the CSU/CSI-u form per the negotiated protocol (implement Kitty CSI unicode ; modifiers u only when caps.keyboard == Kitty and the SUT enabled it). Mouse: encode_mouse(ev, modes) emits SGR-1006 (ESC [ < b ; col ; row M/m) when mouse_encoding == Sgr and mouse enabled; no-op when disabled. Resize: actor calls pty.resize (not a byte sequence). Paste: if bracketed_paste, wrap in ESC[200~ … ESC[201~, else raw.
 
 Acceptance: encode_key(Up, app_cursor_keys=true) == ESC O A; ==false → ESC [ A. Ctrl+C → [0x03]. Mouse click at row3/col5 SGR → ESC[<0;5;3M.
-10. Locator engine (pros-core::locator)
+10. Locator engine (muse-core::locator)
 rust
 
 pub enum Locator {
@@ -272,7 +278,7 @@ pub fn resolve(screen: &Screen, loc: &Locator, multiline: bool) -> Vec<Match>;
 Algorithm for Text/Regex: build per-row logical strings from active_grid (skip Spacer, map Empty→space). If multiline, also build soft-wrap-joined logical lines (a row whose last cell wrapped joins the next). Search each line; for each hit compute the Rect by walking columns counting display width back to cell coordinates (so a match after a wide glyph maps to the right column). Styled filters matched cells by pred. Cursor returns a 1×1 rect at screen.cursor. Resolution is stateless and pure; the actor wraps it in deadline polling (§8 rule 4) for web-first retry.
 
 Acceptance: with 日本x on row 0 (日,本 wide), Text{"x"} → rect at col 4 (0-indexed). Regex{"^\\$ "} matches a prompt only at line start.
-11. Rendering (pros-render)
+11. Rendering (muse-render)
 rust
 
 pub enum SnapshotKind { Text, Styled, Pixel { scale: u8 } }
@@ -282,7 +288,7 @@ pub trait Renderer { fn render(&self, s: &Screen, k: SnapshotKind) -> Snapshot; 
 Text tier: join active grid rows, trim trailing spaces per line, strip trailing blank lines; this is the golden text. Styled tier: a stable, diff-friendly format — for each row, the text line, plus a parallel run-length list of (start_col, len, fg, bg, attrs) serialized canonically (sorted, lowercase hex). Also expose an SVG renderer for human review (cells as <rect>+<text>, embedded font). Pixel tier: deterministic rasterization. Embed one font (assets/font.ttf, a fixed monospace) compiled into the binary via include_bytes!; rasterize with swash/cosmic-text (or fontdue) at fixed cell metrics cell_w × cell_h (e.g. 9×18 at scale=1), fixed palette for the 16 ANSI colors, no system fonts, no subpixel AA (grayscale AA only, or none for max determinism). Output RGBA PNG via image. Determinism mandate: identical Screen + profile ⇒ byte-identical PNG on every OS.
 
 Acceptance: render the same screen twice → identical bytes; render on Linux and macOS CI → identical SHA-256 (CI test).
-12. Diff subsystem (pros-diff)
+12. Diff subsystem (muse-diff)
 rust
 
 pub struct DiffOptions { pub masks: Vec<MaskRule>, pub normalize: Vec<NormalizeRule>,
@@ -296,7 +302,7 @@ pub enum DiffResult { Match, Mismatch { report: DiffReport } }
 Text/Styled diff: apply normalize (regex replace) then masks (replace masked cells with sentinel \u{2588} or blank) to both baseline and actual; compare; on mismatch produce a unified line diff (similar crate) and, for styled, a per-cell style diff list. Pixel diff: apply rect masks (fill constant), compute per-pixel max_channel_delta; a pixel "differs" if delta > pixel_tolerance; diff_ratio = differing/total; Mismatch iff diff_ratio > max_diff_ratio (defaults tolerance=0, ratio=0.0). Emit a diff PNG highlighting changed pixels. Animation stabilization: AutoMaskVolatile collects frames within window, computes the set of cells that change across them, and masks that set before diffing; RequireStableFrames(k) requires k identical consecutive frames before snapshotting (the actor enforces this). Baselines: stored at snapshots/{test}/{profile}__{cols}x{rows}__{os}.{txt|styled|png}; missing baseline ⇒ create + pass on first run (record "created"); --update overwrites.
 
 Acceptance: a screen with a live clock at a known rect passes when that rect is masked; pixel diff of a 1-cell color change with tolerance=0 fails and the diff PNG marks exactly those pixels.
-13. Trace subsystem (pros-trace)
+13. Trace subsystem (muse-trace)
 
 A trace is a directory (zipped on export):
 
@@ -308,8 +314,8 @@ trace/
   steps.jsonl      {step_id, name, t0, t1, assertions:[{kind, ok, detail}]}
   artifacts/       failure-*.png, diff-*.png
 
-asciinema v2 header line: {"version":2,"width":C,"height":R,"timestamp":epoch,"env":{"TERM":...}}, then [float_seconds, "o", "string"] per event. Recorder API: on_output(bytes), on_input(bytes), on_frame(screen, step), begin_step/end_step, on_assertion, flush(). The recorder subscribes to the actor's event broadcast and must not lag (give it a dedicated buffered channel, not the lossy broadcast). Acceptance: output.cast replays in a stock asciinema player; pros trace view reconstructs every frame.
-14. Actor system (pros-engine-actor)
+asciinema v2 header line: {"version":2,"width":C,"height":R,"timestamp":epoch,"env":{"TERM":...}}, then [float_seconds, "o", "string"] per event. Recorder API: on_output(bytes), on_input(bytes), on_frame(screen, step), begin_step/end_step, on_assertion, flush(). The recorder subscribes to the actor's event broadcast and must not lag (give it a dedicated buffered channel, not the lossy broadcast). Acceptance: output.cast replays in a stock asciinema player; muse trace view reconstructs every frame.
+14. Actor system (muse-engine-actor)
 
 Hierarchy: SessionManager → Session → Context → Terminal(actor). Each Terminal is a tokio task owning Pty, Box<dyn Emulator>, Synchronizer, Recorder. Communication:
 rust
@@ -331,14 +337,14 @@ Task loop (tokio select!):
     On Shutdown / EOF: pty.kill, drain pending waiters with Err(Closed), recorder.flush.
 
 Backpressure: pty read is the producer; the loop processes inline (cheap). Waiters resolved on FrameEvent or safety tick. Supervision: a panicking actor closes its handle; Context surfaces it as EngineError::TerminalCrashed. Acceptance: 100 concurrent contexts each spawning cat and writing/expecting echo complete in < 2 s on CI.
-15. Protocol + engine server (proto/, pros-proto, pros-engine)
+15. Protocol + engine server (proto/, muse-proto, muse-engine)
 
-Single source of truth proscenium.proto (abridged — agent fills field numbers contiguously):
+Single source of truth muse.proto (abridged — agent fills field numbers contiguously):
 proto
 
-syntax = "proto3"; package proscenium.v1;
+syntax = "proto3"; package muse.v1;
 
-service Proscenium {
+service Muse {
   rpc Handshake(HandshakeReq) returns (HandshakeResp);     // negotiate protocol_version
   rpc NewContext(NewContextReq) returns (ContextId);
   rpc CloseContext(ContextId) returns (Ack);
@@ -366,7 +372,7 @@ message SnapshotResp { oneof s { string text=1; StyledSnapshot styled=2; bytes p
 message Locator { oneof l { TextLoc text=1; string regex=2; CellLoc cell=3; RectLoc region=4; StyledLoc styled=5; CursorLoc cursor=6; LineLoc line=7; } }
 // Cell, CellStyle, Color, Capabilities, Event{ oneof { OutputChunk, Frame } } …
 
-Server (pros-engine): tonic service holding the SessionManager. Handlers translate proto→domain (pros-proto::map), call the relevant TerminalHandle, translate the result back. ResolveLocator/Assert pass deadline_ms into the actor's waiter so retry happens server-side. Subscribe bridges the actor broadcast to a tonic server stream. Transport: Unix domain socket by default (path in config), TCP optional. Frame with Connect/gRPC (Connect for browser compatibility). Acceptance: a raw gRPC client can NewContext → Spawn(["echo","hi"]) → ResolveLocator(Text "hi", 1000ms) and get one match.
+Server (muse-engine): tonic service holding the SessionManager. Handlers translate proto→domain (muse-proto::map), call the relevant TerminalHandle, translate the result back. ResolveLocator/Assert pass deadline_ms into the actor's waiter so retry happens server-side. Subscribe bridges the actor broadcast to a tonic server stream. Transport: Unix domain socket by default (path in config), TCP optional. Frame with Connect/gRPC (Connect for browser compatibility). Acceptance: a raw gRPC client can NewContext → Spawn(["echo","hi"]) → ResolveLocator(Text "hi", 1000ms) and get one match.
 16. Codegen pipeline (buf)
 
 buf.gen.yaml drives all SDK base generation from proto/:
@@ -381,24 +387,24 @@ plugins:
   - { local: protoc-gen-grpc-python,             out: sdks/python/gen }
   - { protoc_builtin: cpp,                        out: sdks/cpp/gen }      # + grpc_cpp plugin
 
-Rust server/client via tonic-build in pros-proto/build.rs. CI gates: buf lint, buf breaking --against '.git#branch=main'. Generated code is committed (so consumers don't need the toolchain) and regenerated by pros codegen / CI. Acceptance: buf generate produces compiling base clients in all five languages; buf breaking fails a PR that renames a field.
-17. Embedded FFI (pros-ffi)
+Rust server/client via tonic-build in muse-proto/build.rs. CI gates: buf lint, buf breaking --against '.git#branch=main'. Generated code is committed (so consumers don't need the toolchain) and regenerated by muse codegen / CI. Acceptance: buf generate produces compiling base clients in all five languages; buf breaking fails a PR that renames a field.
+17. Embedded FFI (muse-ffi)
 
-C ABI, opaque handles, explicit ownership. cbindgen emits ffi-headers/proscenium.h.
+C ABI, opaque handles, explicit ownership. cbindgen emits ffi-headers/muse.h.
 rust
 
-#[repr(C)] pub struct ProsContext { _p: [u8;0] }
-#[repr(C)] pub enum ProsStatus { Ok=0, Timeout=1, NotFound=2, Crashed=3, BadArg=4, Internal=5 }
-#[no_mangle] pub extern "C" fn pros_context_new(profile: *const c_char, cols: u16, rows: u16) -> *mut ProsContext;
-#[no_mangle] pub extern "C" fn pros_spawn(ctx: *mut ProsContext, argv: *const *const c_char, argc: usize) -> *mut ProsTerminal;
-#[no_mangle] pub extern "C" fn pros_write(t: *mut ProsTerminal, data: *const u8, len: usize) -> ProsStatus;
-#[no_mangle] pub extern "C" fn pros_resolve_text(t: *mut ProsTerminal, pat: *const c_char, deadline_ms: u32, out_found: *mut bool) -> ProsStatus;
-#[no_mangle] pub extern "C" fn pros_snapshot_text(t: *mut ProsTerminal, out: *mut *mut c_char) -> ProsStatus; // caller frees via pros_string_free
-#[no_mangle] pub extern "C" fn pros_string_free(s: *mut c_char);
-#[no_mangle] pub extern "C" fn pros_terminal_free(t: *mut ProsTerminal);
-#[no_mangle] pub extern "C" fn pros_context_free(c: *mut ProsContext);
+#[repr(C)] pub struct MuseContext { _p: [u8;0] }
+#[repr(C)] pub enum MuseStatus { Ok=0, Timeout=1, NotFound=2, Crashed=3, BadArg=4, Internal=5 }
+#[no_mangle] pub extern "C" fn muse_context_new(profile: *const c_char, cols: u16, rows: u16) -> *mut MuseContext;
+#[no_mangle] pub extern "C" fn muse_spawn(ctx: *mut MuseContext, argv: *const *const c_char, argc: usize) -> *mut MuseTerminal;
+#[no_mangle] pub extern "C" fn muse_write(t: *mut MuseTerminal, data: *const u8, len: usize) -> MuseStatus;
+#[no_mangle] pub extern "C" fn muse_resolve_text(t: *mut MuseTerminal, pat: *const c_char, deadline_ms: u32, out_found: *mut bool) -> MuseStatus;
+#[no_mangle] pub extern "C" fn muse_snapshot_text(t: *mut MuseTerminal, out: *mut *mut c_char) -> MuseStatus; // caller frees via muse_string_free
+#[no_mangle] pub extern "C" fn muse_string_free(s: *mut c_char);
+#[no_mangle] pub extern "C" fn muse_terminal_free(t: *mut MuseTerminal);
+#[no_mangle] pub extern "C" fn muse_context_free(c: *mut MuseContext);
 
-Ownership rules: every *mut returned by the lib is freed by a matching pros_*_free; out-strings are heap-allocated by Rust and freed by pros_string_free; the lib never frees caller memory. Embedded mode runs a single-threaded tokio runtime internally (lazy-init global). Higher-level idiomatic wrappers generated by Diplomat (C++, JS/WASM, Python) and UniFFI (Python/Swift/Kotlin, Go via uniffi-bindgen-go) layered on this surface. Embedded surface is reduced (spawn/input/resolve/snapshot only); tracing/matrix/remote are daemon-only.
+Ownership rules: every *mut returned by the lib is freed by a matching muse_*_free; out-strings are heap-allocated by Rust and freed by muse_string_free; the lib never frees caller memory. Embedded mode runs a single-threaded tokio runtime internally (lazy-init global). Higher-level idiomatic wrappers generated by Diplomat (C++, JS/WASM, Python) and UniFFI (Python/Swift/Kotlin, Go via uniffi-bindgen-go) layered on this surface. Embedded surface is reduced (spawn/input/resolve/snapshot only); tracing/matrix/remote are daemon-only.
 18. SDK sugar contract (sdks/*)
 
 Each SDK = generated base + hand-written sugar. Sugar MUST implement this shared behavioral contract so the conformance suite passes uniformly:
@@ -411,9 +417,9 @@ Each SDK = generated base + hand-written sugar. Sugar MUST implement this shared
     Errors map 1:1 to the §21 taxonomy.
 
 Default deadlines, retry cadence, snapshot path scheme, and normalization semantics are identical across SDKs (enforced by conformance). Acceptance: the same logical test, written in Rust and Go sugar, produces identical pass/fail and identical snapshot bytes against the reference engine.
-19. Runner (pros-runner)
+19. Runner (muse-runner)
 
-Responsibilities: discover tests, expand matrix to the cartesian product (profile × shell × size), schedule across a bounded worker pool (default = CPU count), each test in a fresh Context. Retry policy: --retries N with flake quarantine (a test that fails then passes is reported flaky, not pass). Reporters: pretty (TTY, live), junit (XML), json, github (annotations). Flags: --update-snapshots, --grep, --shard i/n, --profile, --watch. Acceptance: pros run --profile xterm,vt220 --size 80x24 runs each test twice (once per profile) in isolated contexts and emits valid JUnit.
+Responsibilities: discover tests, expand matrix to the cartesian product (profile × shell × size), schedule across a bounded worker pool (default = CPU count), each test in a fresh Context. Retry policy: --retries N with flake quarantine (a test that fails then passes is reported flaky, not pass). Reporters: pretty (TTY, live), junit (XML), json, github (annotations). Flags: --update-snapshots, --grep, --shard i/n, --profile, --watch. Acceptance: muse run --profile xterm,vt220 --size 80x24 runs each test twice (once per profile) in isolated contexts and emits valid JUnit.
 20. Conformance / differential harness (conformance/)
 
 The trust anchor for the multi-SDK and multi-emulator story.
@@ -444,7 +450,7 @@ steps:
 Run against (a) the reference Rust engine, and (b) every SDK (each SDK has a tiny conformance driver that executes steps via its sugar and asserts). This is what guarantees Go ≡ C++ ≡ Python ≡ Rust. Acceptance: all corpora green against engine + all built SDKs in CI.
 21. Error model
 
-pros-core::Error (thiserror), mapped to gRPC Status codes and FFI ProsStatus:
+muse-core::Error (thiserror), mapped to gRPC Status codes and FFI MuseStatus:
 Domain error	gRPC	FFI	Meaning
 SpawnFailed	INTERNAL	Internal	PTY/exec failed
 Timeout	DEADLINE_EXCEEDED	Timeout	locator/assert deadline
@@ -455,11 +461,11 @@ ProtocolMismatch	FAILED_PRECONDITION	BadArg	version negotiation
 Internal	INTERNAL	Internal	bug
 
 Assertions return a structured AssertResp{ok, actual, expected, detail} rather than erroring on logical failure (only transport/engine faults are errors).
-22. Configuration (proscenium.toml)
+22. Configuration (muse.toml)
 toml
 
 [engine
-] socket = "/tmp/pros.sock"  protocol_version = 1
+] socket = "/tmp/muse.sock"  protocol_version = 1
 [sync
 ]   quiet_window_ms = 50  max_settle_ms = 2000  tick_ms = 10
 [defaults
@@ -471,13 +477,13 @@ toml
 [[normalize
 ]] re = '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'  replace = "<TS>"
 
-Precedence: CLI flags > env (PROS_*) > proscenium.toml > built-in defaults. Loaded by pros-core::config, validated at startup.
+Precedence: CLI flags > env (MUSE_*) > muse.toml > built-in defaults. Loaded by muse-core::config, validated at startup.
 23. Observability
 
-tracing crate throughout; RUST_LOG/PROS_LOG controls level. Spans per RPC and per actor command. pros doctor prints: toolchain, font hash, available shells, profile table, socket reachability, and a self-test (spawn echo, assert). Metrics (optional, P2): contexts active, frames/s, assert latency histogram.
+tracing crate throughout; RUST_LOG/MUSE_LOG controls level. Spans per RPC and per actor command. muse doctor prints: toolchain, font hash, available shells, profile table, socket reachability, and a self-test (spawn echo, assert). Metrics (optional, P2): contexts active, frames/s, assert latency histogram.
 24. Security
 
-The engine spawns arbitrary programs — treat it as locally trusted only. UDS default with 0600 perms; TCP requires an explicit --listen and a token (PROS_TOKEN, checked in Handshake). Never log full env (may contain secrets) — redact values, keep keys. Remote PTY (P2) requires explicit host allowlist. SUT output is never eval'd.
+The engine spawns arbitrary programs — treat it as locally trusted only. UDS default with 0600 perms; TCP requires an explicit --listen and a token (MUSE_TOKEN, checked in Handshake). Never log full env (may contain secrets) — redact values, keep keys. Remote PTY (P2) requires explicit host allowlist. SUT output is never eval'd.
 25. Build / CI / release
 
-CI jobs: (1) cargo fmt --check, clippy -D warnings, cargo test (all crates); (2) buf lint + buf breaking; (3) buf generate + build each SDK + run its conformance driver; (4) cross-OS pixel-determinism test (Linux+macOS); (5) emulator corpus. Release: static engine binary per platform (musl on Linux), libpros artifacts + proscenium.h, and publish SDKs to crates.io / npm / PyPI / Go module proxy / vcpkg+Conan. Pin the embedded font; its SHA is asserted in tests so it can't drift.
+CI jobs: (1) cargo fmt --check, clippy -D warnings, cargo test (all crates); (2) buf lint + buf breaking; (3) buf generate + build each SDK + run its conformance driver; (4) cross-OS pixel-determinism test (Linux+macOS); (5) emulator corpus. Release: static engine binary per platform (musl on Linux), libpros artifacts + muse.h, and publish SDKs to crates.io / npm / PyPI / Go module proxy / vcpkg+Conan. Pin the embedded font; its SHA is asserted in tests so it can't drift.

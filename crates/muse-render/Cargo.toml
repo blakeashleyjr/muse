@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Text, styled, and deterministic pixel renderers (with a baked bitmap font) for muse snapshots."
 
 [dependencies]
 muse-core.workspace = true

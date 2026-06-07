@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Async wrapper over portable-pty for spawning and driving programs under a PTY in muse."
 
 [dependencies]
 muse-core.workspace = true

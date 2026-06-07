@@ -75,4 +75,13 @@ jobs:
       - uses: bufbuild/buf-action@v1
         with:
           input: proto
-          breaking_against: "https://github.com/muse-term/muse.git#branch=main,subdir=proto"
+          breaking_against: "https://github.com/blakeashleyjr/muse.git#branch=main,subdir=proto"
+
+  deny:
+    name: cargo-deny (advisories + licenses + bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources

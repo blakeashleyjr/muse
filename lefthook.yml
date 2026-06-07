@@ -1,0 +1,32 @@
+# lefthook — git hooks for muse.
+#
+# Install once per clone:   lefthook install
+# Run manually:             lefthook run pre-commit
+# Skip on a commit:         LEFTHOOK=0 git commit ...   (or git commit --no-verify)
+#
+# These hooks mirror the gates enforced in CI (.github/workflows/ci.yml) so a
+# local commit fails for the same reasons a pull request would.
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.rs"
+      # rustfmt the whole tree; the check is fast and avoids partial-format drift.
+      run: cargo fmt --all -- --check
+      fail_text: "Run `cargo fmt --all` to fix formatting."
+    clippy:
+      glob: "*.rs"
+      run: cargo clippy --workspace --all-targets -- -D warnings
+      fail_text: "Clippy found warnings (treated as errors in CI)."
+    buf-lint:
+      glob: "proto/**/*.proto"
+      # No-op when buf isn't installed locally; the `proto` CI job is authoritative.
+      run: command -v buf >/dev/null 2>&1 && buf lint proto || echo "buf not installed — skipping (CI will lint)"
+
+pre-push:
+  parallel: false
+  commands:
+    test:
+      run: cargo test --workspace
+      fail_text: "Workspace tests must pass before pushing."

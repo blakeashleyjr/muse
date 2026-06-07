@@ -2,3 +2,9 @@
 **/*.rs.bk
 *.profraw
 /sdks/*/gen
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+*~

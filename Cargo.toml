@@ -17,7 +17,11 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/muse-term/muse"
+repository = "https://github.com/blakeashleyjr/muse"
+homepage = "https://github.com/blakeashleyjr/muse"
+readme = "README.md"
+keywords = ["terminal", "testing", "tui", "snapshot", "vt"]
+categories = ["development-tools::testing", "command-line-utilities"]
 
 [workspace.dependencies]
 muse-core = { path = "crates/muse-core" }
