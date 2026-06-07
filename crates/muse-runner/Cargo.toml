@@ -1,0 +1,21 @@
+[package]
+name = "muse-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+muse-core.workspace = true
+muse-emulator.workspace = true
+muse-render.workspace = true
+muse-diff.workspace = true
+muse-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tempfile = "3"

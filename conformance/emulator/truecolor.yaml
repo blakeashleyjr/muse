@@ -1,0 +1,9 @@
+name: truecolor
+profile: xterm
+feed: "\e[38;2;10;20;30mX\e[48;5;4mY"
+expect:
+  lines:
+    - text: "XY"
+      styles:
+        - {start: 0, len: 1, fg: {rgb: [10, 20, 30]}}
+        - {start: 1, len: 1, bg: {indexed: 4}}

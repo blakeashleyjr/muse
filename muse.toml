@@ -1,0 +1,30 @@
+# muse configuration. Precedence: CLI flags > env (MUSE_*) > muse.toml > defaults.
+
+[engine]
+socket = "/tmp/muse.sock"
+protocol_version = 1
+
+[sync]
+quiet_window_ms = 50
+max_settle_ms = 2000
+tick_ms = 10
+
+[defaults]
+profile = "xterm"
+cols = 80
+rows = 24
+assert_deadline_ms = 5000
+
+[snapshots]
+dir = "snapshots"
+update = false
+pixel_scale = 1
+
+[runner]
+workers = 0   # 0 = number of CPUs
+retries = 0
+reporter = "pretty"
+
+[[normalize]]
+re = '\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}'
+replace = "<TS>"

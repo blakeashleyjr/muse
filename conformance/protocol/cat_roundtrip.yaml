@@ -1,0 +1,6 @@
+# Protocol corpus: drive an interactive program and assert the echo.
+name: cat_roundtrip
+spawn: ["cat"]
+steps:
+  - write: "muse-conformance\n"
+  - expect_contains: {line: 0, contains: "muse-conformance"}

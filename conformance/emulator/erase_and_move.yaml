@@ -1,0 +1,7 @@
+name: erase_and_move
+profile: xterm
+# write hello, CR, move right 2, erase to end of line
+feed: "hello\r\e[2C\e[0K"
+expect:
+  lines:
+    - text: "he"

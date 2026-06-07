@@ -1,0 +1,14 @@
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: ../sdks/go/gen
+  - remote: buf.build/connectrpc/go
+    out: ../sdks/go/gen
+  - remote: buf.build/connectrpc/es
+    out: ../sdks/ts/gen
+  - remote: buf.build/protocolbuffers/python
+    out: ../sdks/python/gen
+  - remote: buf.build/grpc/python
+    out: ../sdks/python/gen
+  - protoc_builtin: cpp
+    out: ../sdks/cpp/gen

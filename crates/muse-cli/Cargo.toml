@@ -1,0 +1,26 @@
+[package]
+name = "muse-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "muse"
+path = "src/main.rs"
+
+[dependencies]
+muse-core.workspace = true
+muse-emulator.workspace = true
+muse-render.workspace = true
+muse-diff.workspace = true
+muse-trace.workspace = true
+muse-engine.workspace = true
+muse-runner.workspace = true
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,19 @@
+# Example muse test spec. Run with:
+#   muse run examples/login_flow.yaml
+#
+# Expands across the matrix (profile × size); each case runs in a fresh,
+# isolated context with web-first retrying assertions.
+name: login_flow
+matrix:
+  profiles: [xterm, vt220]
+  sizes: ["80x24"]
+spawn: ["sh", "-c", "printf 'username: '; read u; printf 'welcome, %s\\n' \"$u\""]
+steps:
+  - expect_visible: {text: "username:"}
+  - write: "ada\n"
+  # locate the whole greeting line and check its text contains the name
+  - expect_visible: {text: "welcome, ada"}
+  - snapshot: {name: after_login, kind: text}
+  - snapshot:
+      name: after_login_styled
+      kind: styled

@@ -1,0 +1,18 @@
+[package]
+name = "muse-diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+muse-core.workspace = true
+muse-render.workspace = true
+image.workspace = true
+similar.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

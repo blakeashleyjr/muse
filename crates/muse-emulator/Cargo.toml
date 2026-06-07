@@ -1,0 +1,12 @@
+[package]
+name = "muse-emulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+muse-core.workspace = true
+vte.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true

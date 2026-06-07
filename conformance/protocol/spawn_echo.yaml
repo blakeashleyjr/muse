@@ -1,0 +1,6 @@
+# Protocol corpus: spawn a program and assert visible output.
+name: spawn_echo
+spawn: ["echo", "hi"]
+steps:
+  - expect_visible: {text: "hi"}
+  - expect_text: {line: 0, equals: "hi"}

@@ -1,0 +1,8 @@
+name: wide_glyph
+profile: xterm
+# 日本x — two wide CJK glyphs then ASCII x at column 4
+feed: "日本x"
+expect:
+  cursor: {row: 0, col: 5}
+  lines:
+    - text: "日本x"

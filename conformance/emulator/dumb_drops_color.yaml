@@ -1,0 +1,8 @@
+name: dumb_drops_color
+profile: dumb
+feed: "\e[31mRED\e[0m"
+expect:
+  lines:
+    - text: "RED"
+      styles:
+        - {start: 0, len: 3, fg: default}

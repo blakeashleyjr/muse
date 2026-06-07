@@ -1,0 +1,144 @@
+// muse wire protocol — single source of truth (§15).
+//
+// The reference engine ships an embedded (in-process) implementation; this
+// definition documents the language-agnostic gRPC/Connect surface from which
+// the Go / TS / Python / C++ / Rust SDK bases are generated (§16). Field
+// numbers are contiguous and stable.
+syntax = "proto3";
+package muse.v1;
+
+service Muse {
+  rpc Handshake(HandshakeReq) returns (HandshakeResp);
+  rpc NewContext(NewContextReq) returns (ContextId);
+  rpc CloseContext(ContextId) returns (Ack);
+  rpc Spawn(SpawnReq) returns (TerminalId);
+  rpc Write(WriteReq) returns (Ack);
+  rpc Key(KeyReq) returns (Ack);
+  rpc Mouse(MouseReq) returns (Ack);
+  rpc Resize(ResizeReq) returns (Ack);
+  rpc Paste(PasteReq) returns (Ack);
+  rpc ResolveLocator(ResolveReq) returns (ResolveResp);
+  rpc Snapshot(SnapshotReq) returns (SnapshotResp);
+  rpc Assert(AssertReq) returns (AssertResp);
+  rpc SetProfile(SetProfileReq) returns (Capabilities);
+  rpc BeginStep(StepReq) returns (Ack);
+  rpc EndStep(TerminalIdMsg) returns (Ack);
+  rpc StartTrace(TraceReq) returns (Ack);
+  rpc ExportTrace(TerminalIdMsg) returns (TracePath);
+  rpc Subscribe(SubscribeReq) returns (stream Event);
+}
+
+message Ack {}
+message HandshakeReq { uint32 protocol_version = 1; }
+message HandshakeResp { uint32 protocol_version = 1; string engine_version = 2; }
+message NewContextReq { string profile = 1; uint32 cols = 2; uint32 rows = 3; }
+message ContextId { string id = 1; }
+message SpawnReq {
+  string context = 1;
+  repeated string argv = 2;
+  map<string, string> env = 3;
+  string cwd = 4;
+}
+message TerminalId { string id = 1; }
+message TerminalIdMsg { string terminal = 1; }
+
+message WriteReq { string terminal = 1; bytes data = 2; }
+message PasteReq { string terminal = 1; bytes data = 2; }
+message ResizeReq { string terminal = 1; uint32 cols = 2; uint32 rows = 3; }
+
+enum SpecialKey {
+  CHAR = 0; ENTER = 1; TAB = 2; BACKSPACE = 3; ESCAPE = 4;
+  UP = 5; DOWN = 6; LEFT = 7; RIGHT = 8;
+  HOME = 9; END = 10; PAGE_UP = 11; PAGE_DOWN = 12;
+  INSERT = 13; DELETE = 14; F = 15;
+}
+message Key {
+  oneof k { string char = 1; SpecialKey special = 2; }
+  uint32 fnum = 3; // for F-keys
+}
+message KeyReq { string terminal = 1; Key key = 2; uint32 mods = 3; }
+
+message MouseReq {
+  string terminal = 1;
+  uint32 button = 2;   // 0=left 1=middle 2=right 64=wheel-up 65=wheel-down
+  uint32 action = 3;   // 0=press 1=release 2=move
+  uint32 row = 4;
+  uint32 col = 5;
+  uint32 mods = 6;
+}
+
+// ---- locators -------------------------------------------------------------
+message Rect { uint32 row = 1; uint32 col = 2; uint32 w = 3; uint32 h = 4; }
+message TextLoc { string pattern = 1; bool ignore_case = 2; bool whole_line = 3; }
+message CellLoc { uint32 row = 1; uint32 col = 2; }
+message LineLoc { uint32 row = 1; }
+message StyledLoc { string text = 1; Color fg = 2; Color bg = 3; uint32 attrs_all = 4; uint32 attrs_any = 5; }
+message CursorLoc {}
+message Locator {
+  oneof l {
+    TextLoc text = 1;
+    string regex = 2;
+    CellLoc cell = 3;
+    Rect region = 4;
+    StyledLoc styled = 5;
+    CursorLoc cursor = 6;
+    LineLoc line = 7;
+  }
+}
+message ResolveReq { string terminal = 1; Locator loc = 2; bool multiline = 3; uint32 deadline_ms = 4; }
+message Match { Rect rect = 1; string text = 2; }
+message ResolveResp { repeated Match matches = 1; }
+
+// ---- colors / style -------------------------------------------------------
+message Color {
+  oneof c { bool default = 1; uint32 indexed = 2; uint32 rgb = 3; }
+}
+message CellStyle { Color fg = 1; Color bg = 2; Color underline = 3; uint32 attrs = 4; }
+
+// ---- snapshots ------------------------------------------------------------
+message SnapshotReq {
+  string terminal = 1;
+  uint32 kind = 2;          // 0=text 1=styled 2=pixel
+  uint32 pixel_scale = 3;
+  uint32 min_stable_frames = 4;
+  uint32 deadline_ms = 5;
+}
+message StyleRun { uint32 start_col = 1; uint32 len = 2; CellStyle style = 3; }
+message StyledRow { string text = 1; repeated StyleRun runs = 2; }
+message StyledSnapshot { repeated StyledRow rows = 1; }
+message SnapshotResp {
+  oneof s { string text = 1; StyledSnapshot styled = 2; bytes png = 3; }
+}
+
+// ---- assertions -----------------------------------------------------------
+message AssertReq {
+  string terminal = 1;
+  Locator loc = 2;
+  bool multiline = 3;
+  uint32 kind = 4;          // toBeVisible / toHaveText / toContainText / toHaveStyle
+  string expected = 5;
+  uint32 deadline_ms = 6;
+}
+message AssertResp { bool ok = 1; string actual = 2; string expected = 3; string detail = 4; }
+
+// ---- capabilities / profiles ----------------------------------------------
+message SetProfileReq { string terminal = 1; string profile = 2; }
+message Capabilities {
+  string terminfo_name = 1;
+  uint32 color = 2;
+  uint32 keyboard = 3;
+  bool supports_sync_output = 4;
+  bool supports_bracketed_paste = 5;
+  uint32 tab_width = 6;
+}
+
+// ---- steps / trace --------------------------------------------------------
+message StepReq { string terminal = 1; string name = 2; }
+message TraceReq { string terminal = 1; string dir = 2; }
+message TracePath { string path = 1; }
+
+// ---- subscribe ------------------------------------------------------------
+message SubscribeReq { string terminal = 1; }
+message OutputChunk { bytes data = 1; double ts = 2; }
+message Frame { uint64 generation = 1; double ts = 2; }
+message Event { oneof e { OutputChunk output = 1; Frame frame = 2; } }

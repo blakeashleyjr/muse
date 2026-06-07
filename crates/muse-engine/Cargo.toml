@@ -1,0 +1,21 @@
+[package]
+name = "muse-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+muse-core.workspace = true
+muse-emulator.workspace = true
+muse-render.workspace = true
+muse-diff.workspace = true
+muse-trace.workspace = true
+muse-pty.workspace = true
+tokio = { workspace = true }
+bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+tempfile = "3"

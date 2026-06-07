@@ -1,0 +1,9 @@
+name: sgr_basic
+profile: xterm
+feed: "\e[1;31mHI\e[0m"
+expect:
+  cursor: {row: 0, col: 2}
+  lines:
+    - text: "HI"
+      styles:
+        - {start: 0, len: 2, fg: {indexed: 1}, attrs: [BOLD]}

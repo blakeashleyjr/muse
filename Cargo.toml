@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/muse-core",
+    "crates/muse-emulator",
+    "crates/muse-render",
+    "crates/muse-diff",
+    "crates/muse-trace",
+    "crates/muse-pty",
+    "crates/muse-engine",
+    "crates/muse-runner",
+    "crates/muse-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/muse-term/muse"
+
+[workspace.dependencies]
+muse-core = { path = "crates/muse-core" }
+muse-emulator = { path = "crates/muse-emulator" }
+muse-render = { path = "crates/muse-render" }
+muse-trace = { path = "crates/muse-trace" }
+muse-pty = { path = "crates/muse-pty" }
+muse-diff = { path = "crates/muse-diff" }
+muse-engine = { path = "crates/muse-engine" }
+
+# Shared third-party deps
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bitflags = { version = "2", features = ["serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
+smallvec = { version = "1", features = ["serde"] }
+unicode-width = "0.2"
+unicode-segmentation = "1"
+regex = "1"
+vte = "0.13"
+portable-pty = "0.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util"] }
+bytes = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+similar = "2"
+toml = "0.8"
+tracing = "0.1"
+muse-runner = { path = "crates/muse-runner" }
+serde_yaml = "0.9"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 2

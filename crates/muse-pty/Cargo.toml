@@ -1,0 +1,15 @@
+[package]
+name = "muse-pty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+muse-core.workspace = true
+portable-pty.workspace = true
+tokio = { workspace = true }
+bytes.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
