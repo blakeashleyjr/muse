@@ -125,6 +125,56 @@ pub async fn to_contain_text(
     })
 }
 
+pub async fn to_not_be_visible(
+    handle: &TerminalHandle,
+    loc: Locator,
+    multiline: bool,
+    deadline_ms: u64,
+) -> Result<AssertOutcome> {
+    let (ok, matches) = poll_until(handle, loc, multiline, deadline_ms, |m| m.is_empty()).await?;
+    Ok(if ok {
+        AssertOutcome::ok("0 matches", "not visible")
+    } else {
+        let texts: Vec<_> = matches
+            .iter()
+            .map(|m| format!("{:?}", m.text.trim()))
+            .collect();
+        AssertOutcome::fail(
+            format!("{} match(es): {}", matches.len(), texts.join(", ")),
+            "not visible",
+            "locator still matched before deadline",
+        )
+    })
+}
+
+/// Assert the match count satisfies `eq`, or falls within `[min, max]`.
+pub async fn to_have_count(
+    handle: &TerminalHandle,
+    loc: Locator,
+    eq: Option<usize>,
+    min: Option<usize>,
+    max: Option<usize>,
+    multiline: bool,
+    deadline_ms: u64,
+) -> Result<AssertOutcome> {
+    let (ok, matches) = poll_until(handle, loc, multiline, deadline_ms, |m| {
+        let n = m.len();
+        eq.is_none_or(|e| n == e) && min.is_none_or(|lo| n >= lo) && max.is_none_or(|hi| n <= hi)
+    })
+    .await?;
+    let count = matches.len();
+    let constraint = format!("eq={eq:?} min={min:?} max={max:?}");
+    Ok(if ok {
+        AssertOutcome::ok(count.to_string(), constraint)
+    } else {
+        AssertOutcome::fail(
+            count.to_string(),
+            constraint,
+            format!("count={count} did not meet constraint before deadline"),
+        )
+    })
+}
+
 pub async fn to_have_style(
     handle: &TerminalHandle,
     loc: Locator,

@@ -518,6 +518,7 @@ dependencies = [
  "muse-emulator",
  "muse-engine",
  "muse-render",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

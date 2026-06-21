@@ -49,6 +49,12 @@ pub enum TermCmd {
     SetProfile(Box<Profile>),
     StartTrace(Box<(PathBuf, TraceMeta)>),
     ExportTrace(oneshot::Sender<Result<PathBuf>>),
+    /// Wait for the SUT process to exit (or until deadline).
+    /// Replies with the exit code, or `None` on timeout.
+    WaitExit {
+        deadline: Instant,
+        tx: oneshot::Sender<Option<u32>>,
+    },
     Shutdown,
 }
 
@@ -82,6 +88,8 @@ pub struct Terminal {
     resolve_waiters: Vec<ResolveWaiter>,
     snapshot_waiters: Vec<SnapshotWaiter>,
     eof: bool,
+    exit_code: Option<u32>,
+    exit_waiters: Vec<(Instant, oneshot::Sender<Option<u32>>)>,
 }
 
 impl Terminal {
@@ -174,6 +182,12 @@ impl Terminal {
         DefaultRenderer.render(screen, kind)
     }
 
+    fn fire_exit_waiters(&mut self) {
+        for (_, tx) in self.exit_waiters.drain(..) {
+            let _ = tx.send(self.exit_code);
+        }
+    }
+
     /// Resolve any waiters whose deadline has passed (return best-effort result).
     fn check_deadlines(&mut self, now: Instant) {
         let current = self
@@ -200,6 +214,16 @@ impl Terminal {
                 i += 1;
             }
         }
+        // fire exit waiters whose deadline has passed
+        let mut i = 0;
+        while i < self.exit_waiters.len() {
+            if now >= self.exit_waiters[i].0 {
+                let (_, tx) = self.exit_waiters.remove(i);
+                let _ = tx.send(self.exit_code);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     fn handle_cmd(&mut self, cmd: TermCmd) -> bool {
@@ -211,6 +235,7 @@ impl Terminal {
                 if let Some(rec) = self.recorder.as_mut() {
                     rec.on_input(ts, &b);
                 }
+                self.stable_run = 0;
                 self.sync.arm(now);
             }
             TermCmd::Key(ev) => {
@@ -219,6 +244,7 @@ impl Terminal {
                 if let Some(rec) = self.recorder.as_mut() {
                     rec.on_input(ts, &bytes);
                 }
+                self.stable_run = 0;
                 self.sync.arm(now);
             }
             TermCmd::Mouse(ev) => {
@@ -229,11 +255,13 @@ impl Terminal {
                         rec.on_input(ts, &bytes);
                     }
                 }
+                self.stable_run = 0;
                 self.sync.arm(now);
             }
             TermCmd::Resize(c, r) => {
                 let _ = self.pty.resize(c, r);
                 self.emu.resize(c, r);
+                self.stable_run = 0;
                 self.sync.arm(now);
             }
             TermCmd::Paste(b) => {
@@ -242,6 +270,7 @@ impl Terminal {
                 if let Some(rec) = self.recorder.as_mut() {
                     rec.on_input(ts, &bytes);
                 }
+                self.stable_run = 0;
                 self.sync.arm(now);
             }
             TermCmd::Resolve {
@@ -314,6 +343,13 @@ impl Terminal {
                 };
                 let _ = tx.send(res);
             }
+            TermCmd::WaitExit { deadline, tx } => {
+                if let Some(code) = self.exit_code {
+                    let _ = tx.send(Some(code));
+                } else {
+                    self.exit_waiters.push((deadline, tx));
+                }
+            }
             TermCmd::Shutdown => {
                 return false;
             }
@@ -321,7 +357,7 @@ impl Terminal {
         true
     }
 
-    fn finalize(&mut self) {
+    fn finalize(&mut self, fire_exit: bool) {
         // emit a final frame from whatever state we have, resolve outstanding waiters
         let screen = self.emu.snapshot_screen();
         self.generation += 1;
@@ -348,6 +384,13 @@ impl Terminal {
         if let Some(rec) = self.recorder.as_mut() {
             let _ = rec.flush();
         }
+        // Resolve pending exit waiters. When fire_exit is false and exit_code
+        // is not yet known (the PTY slave closed but the process hasn't entered
+        // zombie state yet), leave the waiters for the ticker to resolve once
+        // try_wait succeeds — avoids resolving them with None prematurely.
+        if fire_exit || self.exit_code.is_some() {
+            self.fire_exit_waiters();
+        }
     }
 
     async fn run(mut self) {
@@ -364,13 +407,13 @@ impl Terminal {
                         Some(c) => {
                             if !self.handle_cmd(c) {
                                 let _ = self.pty.kill();
-                                self.finalize();
+                                self.finalize(true);
                                 break;
                             }
                         }
                         None => {
                             // all handles dropped
-                            self.finalize();
+                            self.finalize(true);
                             break;
                         }
                     }
@@ -380,7 +423,15 @@ impl Terminal {
                         Some(bytes) => self.process_output(&bytes),
                         None => {
                             self.eof = true;
-                            self.finalize();
+                            // Non-blocking reap — almost always succeeds immediately after EOF.
+                            if let Some(st) = self.pty.try_wait() {
+                                self.exit_code = Some(st.code);
+                            }
+                            // fire_exit=false: if exit_code is unknown (rare race where the
+                            // PTY slave closed before the process entered zombie state), defer
+                            // exit waiters to the ticker's try_wait retry rather than resolving
+                            // them with None and discarding them.
+                            self.finalize(false);
                         }
                     }
                 }
@@ -388,6 +439,13 @@ impl Terminal {
                     let now_ms = self.now_ms();
                     self.try_emit_stable(now_ms);
                     self.check_deadlines(Instant::now());
+                    // Retry reaping if EOF arrived but try_wait wasn't ready yet.
+                    if self.eof && self.exit_code.is_none() {
+                        if let Some(st) = self.pty.try_wait() {
+                            self.exit_code = Some(st.code);
+                            self.fire_exit_waiters();
+                        }
+                    }
                 }
             }
         }
@@ -422,6 +480,8 @@ impl TerminalHandle {
             resolve_waiters: Vec::new(),
             snapshot_waiters: Vec::new(),
             eof: false,
+            exit_code: None,
+            exit_waiters: Vec::new(),
         };
         tokio::spawn(term.run());
         TerminalHandle { cmd_tx, events }
@@ -483,6 +543,16 @@ impl TerminalHandle {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.send(TermCmd::Shutdown).await
+    }
+
+    /// Wait for the SUT process to exit naturally. Returns the exit code, or
+    /// `None` if `timeout_ms` elapses before the process exits.
+    pub async fn wait_exit(&self, timeout_ms: u64) -> Result<Option<u32>> {
+        let (tx, rx) = oneshot::channel();
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        self.send(TermCmd::WaitExit { deadline, tx }).await?;
+        rx.await
+            .map_err(|_| Error::TerminalCrashed("actor closed".into()))
     }
 
     /// Resolve a locator, retrying server-side until `deadline_ms`.
