@@ -43,6 +43,8 @@ pub enum Cmd {
     Session(session::SessionArgs),
     /// Run the session daemon (normally started on demand by `session open`).
     Serve(session::ServeArgs),
+    /// Serve the session tools over MCP on stdio (for agent hosts).
+    Mcp(session::McpArgs),
     /// Information about generating language SDKs.
     Codegen,
 }
@@ -183,7 +185,7 @@ pub fn codegen_info() -> String {
         .to_string()
 }
 
-async fn cmd_run(args: &RunArgs) -> Outcome {
+pub(crate) async fn cmd_run(args: &RunArgs) -> Outcome {
     if args.specs.is_empty() {
         return Outcome::fail("no spec files given\n");
     }
@@ -325,6 +327,7 @@ pub async fn dispatch(cli: Cli) -> Outcome {
         Cmd::Codegen => Outcome::ok(codegen_info()),
         Cmd::Session(args) => session::cmd_session(&args).await,
         Cmd::Serve(args) => session::cmd_serve(&args).await,
+        Cmd::Mcp(args) => session::cmd_mcp(&args).await,
     }
 }
 

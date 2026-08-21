@@ -7,6 +7,7 @@ pub mod client;
 pub mod daemon;
 pub mod export;
 pub mod keys;
+pub mod mcp;
 pub mod proto;
 
 use crate::Outcome;
@@ -31,6 +32,21 @@ pub struct ServeArgs {
     /// Stop a running daemon (closing its sessions) instead of starting one.
     #[arg(long)]
     pub stop: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct McpArgs {
+    /// Socket path (default: $MUSE_SOCKET, $XDG_RUNTIME_DIR/muse/muse.sock).
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+}
+
+pub async fn cmd_mcp(a: &McpArgs) -> Outcome {
+    let srv = mcp::McpServer::new(mcp::socket_for(a.socket.as_deref()));
+    match srv.run_stdio().await {
+        Ok(()) => Outcome::ok(""),
+        Err(e) => transport(e),
+    }
 }
 
 #[derive(clap::Args, Debug)]
