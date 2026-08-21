@@ -47,11 +47,19 @@ impl Synchronizer {
     }
 
     /// Record an output chunk.
+    ///
+    /// Spontaneous output while `Idle` (the SUT repainting with no input from
+    /// us — an async load finishing, a spinner resolving) re-arms the machine
+    /// so a fresh stable frame is emitted once it quiets down. Without this,
+    /// retrying assertions would keep resolving against the last frame that
+    /// happened to follow an input, never the live screen.
     pub fn note_output(&mut self, now_ms: u64) {
         self.last_activity_ms = now_ms;
-        if self.state != SyncState::Idle {
-            self.state = SyncState::Receiving;
+        if self.state == SyncState::Idle {
+            // max_settle is measured from the first spontaneous byte
+            self.armed_at_ms = now_ms;
         }
+        self.state = SyncState::Receiving;
     }
 
     /// Set whether a DEC-2026 synchronized-update block is open.
@@ -98,6 +106,10 @@ impl Synchronizer {
 
     pub fn tick_ms(&self) -> u64 {
         self.cfg.tick_ms
+    }
+
+    pub fn max_settle_ms(&self) -> u64 {
+        self.cfg.max_settle_ms
     }
 }
 
@@ -191,10 +203,55 @@ mod tests {
     }
 
     #[test]
-    fn note_output_idle_stays_idle() {
+    fn note_output_idle_enters_receiving() {
         let mut s = Synchronizer::new(cfg());
         s.note_output(5);
-        assert_eq!(s.state(), SyncState::Idle);
+        assert_eq!(s.state(), SyncState::Receiving);
+    }
+
+    #[test]
+    fn spontaneous_output_becomes_stable() {
+        // A settled machine sees output with no input in between: it must
+        // produce a new stable frame after the quiet window.
+        let mut s = Synchronizer::new(cfg());
+        s.arm(0);
+        s.note_output(0);
+        assert!(s.evaluate(50));
+        s.consume_stable();
+        s.note_output(1000);
+        assert!(!s.evaluate(1040));
+        assert!(s.evaluate(1050));
+    }
+
+    #[test]
+    fn spontaneous_noisy_output_capped_by_max_settle() {
+        let mut s = Synchronizer::new(cfg());
+        s.note_output(1000);
+        let mut t = 1000;
+        while t < 3000 {
+            t += 10;
+            s.note_output(t);
+        }
+        // armed_at was reset to 1000 when leaving Idle, so 2000ms later it caps
+        assert!(s.evaluate(3000));
+    }
+
+    #[test]
+    fn ready_marker_while_idle_is_stable_immediately() {
+        let mut s = Synchronizer::new(cfg());
+        s.arm(0);
+        s.note_output(0);
+        assert!(s.evaluate(50));
+        s.consume_stable();
+        // the marker rides the output stream: note_ready then note_output
+        s.note_ready();
+        s.note_output(500);
+        assert!(s.evaluate(500));
+    }
+
+    #[test]
+    fn max_settle_accessor() {
+        assert_eq!(Synchronizer::new(cfg()).max_settle_ms(), 2000);
     }
 
     #[test]

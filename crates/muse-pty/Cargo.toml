@@ -17,5 +17,8 @@ portable-pty.workspace = true
 tokio = { workspace = true }
 bytes.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }

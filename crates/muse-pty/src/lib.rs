@@ -144,10 +144,52 @@ impl Pty {
             .map_err(|e| Error::Internal(e.to_string()))
     }
 
+    /// Send a signal to the SUT's whole process group (Unix). `portable-pty`
+    /// runs the child under `setsid`, so its pid is the pgid and helpers it
+    /// forked (pagers, language servers, watchers) are reached too.
+    #[cfg(unix)]
+    fn signal_group(&self, sig: libc::c_int) {
+        if let Some(pid) = self.pid {
+            // SAFETY: plain kill(2) on a pgid we own; errors (ESRCH) are ignored.
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), sig);
+            }
+        }
+    }
+
+    /// Kill the direct child only. Prefer [`Pty::terminate`], which also
+    /// reaches the process group and reaps the child.
     pub fn kill(&mut self) -> Result<()> {
         self.child
             .kill()
             .map_err(|e| Error::Internal(e.to_string()))
+    }
+
+    /// Terminate the SUT and everything in its process group: SIGTERM, wait up
+    /// to `grace` for a clean exit, then SIGKILL — and always reap the child so
+    /// no zombie outlives the session.
+    pub fn terminate(&mut self, grace: std::time::Duration) -> ExitStatus {
+        if let Some(st) = self.try_wait() {
+            return st;
+        }
+        #[cfg(unix)]
+        {
+            self.signal_group(libc::SIGTERM);
+            let t0 = std::time::Instant::now();
+            while t0.elapsed() < grace {
+                if let Some(st) = self.try_wait() {
+                    return st;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            self.signal_group(libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = grace;
+            let _ = self.child.kill();
+        }
+        self.wait()
     }
 
     /// Wait for the child to exit.

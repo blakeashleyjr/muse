@@ -55,7 +55,20 @@ pub enum TermCmd {
         deadline: Instant,
         tx: oneshot::Sender<Option<u32>>,
     },
+    /// The live screen right now (no settling) plus the stable-frame generation.
+    Screen(oneshot::Sender<(Screen, u64)>),
+    /// Process facts: pid, exit code (if exited), whether output hit EOF.
+    Info(oneshot::Sender<TerminalInfo>),
     Shutdown,
+}
+
+/// Facts about the SUT process behind a terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalInfo {
+    pub pid: Option<u32>,
+    pub exit_code: Option<u32>,
+    pub eof: bool,
+    pub generation: u64,
 }
 
 struct ResolveWaiter {
@@ -90,7 +103,15 @@ pub struct Terminal {
     eof: bool,
     exit_code: Option<u32>,
     exit_waiters: Vec<(Instant, oneshot::Sender<Option<u32>>)>,
+    /// Set once the SUT has written anything. Until then (and until
+    /// `max_settle_ms` has elapsed) an empty screen is never declared stable,
+    /// so a slow-starting program can't be snapshotted blank.
+    first_output_seen: bool,
 }
+
+/// How long `Shutdown` / handle-drop waits for the SUT to exit after SIGTERM
+/// before escalating to SIGKILL.
+const TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
 impl Terminal {
     fn now_ms(&self) -> u64 {
@@ -103,6 +124,7 @@ impl Terminal {
 
     fn process_output(&mut self, bytes: &[u8]) {
         let ts = self.ts();
+        self.first_output_seen = true;
         if let Some(rec) = self.recorder.as_mut() {
             rec.on_output(ts, bytes);
         }
@@ -125,6 +147,10 @@ impl Terminal {
     }
 
     fn try_emit_stable(&mut self, now_ms: u64) {
+        if !self.first_output_seen && !self.eof && now_ms < self.sync.max_settle_ms() {
+            // Nothing painted yet: don't settle an empty screen right after spawn.
+            return;
+        }
         if !self.sync.evaluate(now_ms) {
             return;
         }
@@ -189,11 +215,11 @@ impl Terminal {
     }
 
     /// Resolve any waiters whose deadline has passed (return best-effort result).
+    ///
+    /// "Best effort at the deadline" means the screen as it is *now* — not the
+    /// last stable frame, which may predate output the SUT has since written.
     fn check_deadlines(&mut self, now: Instant) {
-        let current = self
-            .last_stable
-            .clone()
-            .unwrap_or_else(|| self.emu.snapshot_screen());
+        let current = self.emu.snapshot_screen();
         let mut i = 0;
         while i < self.resolve_waiters.len() {
             if now >= self.resolve_waiters[i].deadline {
@@ -279,13 +305,16 @@ impl Terminal {
                 deadline,
                 tx,
             } => {
-                // immediate evaluation against the last stable screen
-                if let Some(screen) = &self.last_stable {
-                    let matches = resolve(screen, &loc, multiline);
-                    if !matches.is_empty() {
-                        let _ = tx.send(matches);
-                        return true;
-                    }
+                // immediate evaluation against the last stable screen, or the
+                // live screen when nothing has settled yet
+                let screen = self
+                    .last_stable
+                    .clone()
+                    .unwrap_or_else(|| self.emu.snapshot_screen());
+                let matches = resolve(&screen, &loc, multiline);
+                if !matches.is_empty() {
+                    let _ = tx.send(matches);
+                    return true;
                 }
                 self.resolve_waiters.push(ResolveWaiter {
                     loc,
@@ -350,11 +379,30 @@ impl Terminal {
                     self.exit_waiters.push((deadline, tx));
                 }
             }
+            TermCmd::Screen(tx) => {
+                let _ = tx.send((self.emu.snapshot_screen(), self.generation));
+            }
+            TermCmd::Info(tx) => {
+                let _ = tx.send(TerminalInfo {
+                    pid: self.pty.pid(),
+                    exit_code: self.exit_code,
+                    eof: self.eof,
+                    generation: self.generation,
+                });
+            }
             TermCmd::Shutdown => {
                 return false;
             }
         }
         true
+    }
+
+    /// Stop the SUT (process group) and record its exit code.
+    fn terminate(&mut self) {
+        if self.exit_code.is_none() {
+            let st = self.pty.terminate(TERMINATE_GRACE);
+            self.exit_code = Some(st.code);
+        }
     }
 
     fn finalize(&mut self, fire_exit: bool) {
@@ -406,13 +454,15 @@ impl Terminal {
                     match cmd {
                         Some(c) => {
                             if !self.handle_cmd(c) {
-                                let _ = self.pty.kill();
+                                self.terminate();
                                 self.finalize(true);
                                 break;
                             }
                         }
                         None => {
-                            // all handles dropped
+                            // all handles dropped: nobody can observe the SUT
+                            // any more, so stop it rather than leak it
+                            self.terminate();
                             self.finalize(true);
                             break;
                         }
@@ -482,6 +532,7 @@ impl TerminalHandle {
             eof: false,
             exit_code: None,
             exit_waiters: Vec::new(),
+            first_output_seen: false,
         };
         tokio::spawn(term.run());
         TerminalHandle { cmd_tx, events }
@@ -543,6 +594,23 @@ impl TerminalHandle {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.send(TermCmd::Shutdown).await
+    }
+
+    /// The live screen right now, without waiting for stability, plus the
+    /// current stable-frame generation.
+    pub async fn screen(&self) -> Result<(Screen, u64)> {
+        let (tx, rx) = oneshot::channel();
+        self.send(TermCmd::Screen(tx)).await?;
+        rx.await
+            .map_err(|_| Error::TerminalCrashed("actor closed".into()))
+    }
+
+    /// Process facts: pid, exit code, EOF.
+    pub async fn info(&self) -> Result<TerminalInfo> {
+        let (tx, rx) = oneshot::channel();
+        self.send(TermCmd::Info(tx)).await?;
+        rx.await
+            .map_err(|_| Error::TerminalCrashed("actor closed".into()))
     }
 
     /// Wait for the SUT process to exit naturally. Returns the exit code, or

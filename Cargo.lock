@@ -480,6 +480,7 @@ name = "muse-engine"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc",
  "muse-core",
  "muse-diff",
  "muse-emulator",
@@ -496,6 +497,7 @@ name = "muse-pty"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc",
  "muse-core",
  "portable-pty",
  "tokio",
