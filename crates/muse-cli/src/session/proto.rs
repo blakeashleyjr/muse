@@ -88,6 +88,12 @@ pub enum Op {
         id: Option<String>,
         all: bool,
     },
+    /// Render everything done to this session so far as a runnable spec.
+    ExportSpec {
+        id: String,
+        /// Spec `name:`; defaults to the session name or id.
+        name: Option<String>,
+    },
     Shutdown,
 }
 
@@ -217,6 +223,9 @@ pub enum Response {
     Closed {
         closed: Vec<String>,
     },
+    Spec {
+        yaml: String,
+    },
 }
 
 impl Response {
@@ -311,6 +320,10 @@ mod tests {
                 id: None,
                 all: true,
             },
+            Op::ExportSpec {
+                id: "s1".into(),
+                name: None,
+            },
             Op::Shutdown,
         ] {
             rt(Request::new(op));
@@ -380,6 +393,9 @@ mod tests {
             },
             Response::Closed {
                 closed: vec!["s1".into()],
+            },
+            Response::Spec {
+                yaml: "name: x".into(),
             },
         ] {
             rt(r);

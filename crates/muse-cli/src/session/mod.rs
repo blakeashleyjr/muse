@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod daemon;
+pub mod export;
 pub mod keys;
 pub mod proto;
 
@@ -78,6 +79,17 @@ pub enum SessionCmd {
         id: Option<String>,
         #[arg(long)]
         all: bool,
+    },
+    /// Print a `muse run` spec reproducing this session (inputs + the waits
+    /// that held), ready to save as a regression test.
+    ExportSpec {
+        id: String,
+        /// Spec name (default: the session name or id).
+        #[arg(long)]
+        name: Option<String>,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -458,6 +470,10 @@ pub async fn cmd_session(a: &SessionArgs) -> Outcome {
             id: id.clone(),
             all: *all,
         },
+        SessionCmd::ExportSpec { id, name, .. } => Op::ExportSpec {
+            id: id.clone(),
+            name: name.clone(),
+        },
     };
     match client::request(&sock, &Request::new(op)).await {
         Ok(r) => render(r, json, &a.cmd),
@@ -564,6 +580,15 @@ fn render(resp: Response, json: bool, cmd: &SessionCmd) -> Outcome {
             Outcome::ok(s)
         }
         Response::Closed { closed } => Outcome::ok(format!("closed {}\n", closed.join(" "))),
+        Response::Spec { yaml } => {
+            if let SessionCmd::ExportSpec { out: Some(p), .. } = cmd {
+                return match std::fs::write(p, &yaml) {
+                    Ok(()) => Outcome::ok(format!("{}\n", p.display())),
+                    Err(e) => transport(Error::Internal(format!("write {}: {e}", p.display()))),
+                };
+            }
+            Outcome::ok(yaml)
+        }
         Response::Screen { .. } | Response::Error { .. } => unreachable!("handled above"),
     }
 }

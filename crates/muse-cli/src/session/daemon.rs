@@ -4,6 +4,7 @@
 //! `muse session open`; exits on its own once idle.
 
 use super::client::{daemon_dir, ensure_dir};
+use super::export::{self, Recorded, SpecHeader};
 use super::proto::{
     Input, Op, Request, Response, ScreenInfo, SessionInfo, WaitCond, PROTOCOL_VERSION,
 };
@@ -23,6 +24,12 @@ use tokio::sync::Notify;
 struct Entry {
     handle: TerminalHandle,
     info: SessionInfo,
+    /// Structured history for `export-spec`.
+    recorded: Vec<Recorded>,
+    /// Geometry and env at open (the spec's matrix/env; resizes are steps).
+    open_cols: u16,
+    open_rows: u16,
+    env: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -60,6 +67,14 @@ impl State {
             .get(&key)
             .map(|e| e.info.clone())
             .ok_or_else(|| Error::NotFound(format!("no session `{id}`")))
+    }
+
+    fn record(&self, id: &str, r: Recorded) {
+        let mut t = self.table.lock().unwrap();
+        let key = t.names.get(id).cloned().unwrap_or_else(|| id.to_string());
+        if let Some(e) = t.sessions.get_mut(&key) {
+            e.recorded.push(r);
+        }
     }
 
     fn remove(&self, id: &str) -> Option<Entry> {
@@ -275,13 +290,14 @@ async fn dispatch(op: Op, state: &State) -> Result<Response> {
         }
         Op::Send { id, input } => {
             let h = state.lookup(&id)?;
-            match input {
-                Input::Text { text } => h.write(text.into_bytes()).await?,
-                Input::Bytes { hex } => h.write(decode_hex(&hex)?).await?,
-                Input::Key { key } => h.key(key).await?,
-                Input::Paste { text } => h.paste(text.into_bytes()).await?,
-                Input::Mouse { ev } => h.mouse(ev).await?,
+            match &input {
+                Input::Text { text } => h.write(text.clone().into_bytes()).await?,
+                Input::Bytes { hex } => h.write(decode_hex(hex)?).await?,
+                Input::Key { key } => h.key(*key).await?,
+                Input::Paste { text } => h.paste(text.clone().into_bytes()).await?,
+                Input::Mouse { ev } => h.mouse(*ev).await?,
             }
+            state.record(&id, Recorded::Input(input));
             Ok(Response::Ack)
         }
         Op::Resize { id, cols, rows } => {
@@ -293,6 +309,7 @@ async fn dispatch(op: Op, state: &State) -> Result<Response> {
                 if let Some(e) = t.sessions.get_mut(&key) {
                     e.info.cols = cols;
                     e.info.rows = rows;
+                    e.recorded.push(Recorded::Resize(cols, rows));
                 }
             }
             Ok(Response::Ack)
@@ -364,6 +381,7 @@ async fn dispatch(op: Op, state: &State) -> Result<Response> {
             timeout_ms,
         } => {
             let h = state.lookup(&id)?;
+            let recorded_cond = cond.clone();
             let o = match cond {
                 WaitCond::Visible { loc, multiline } => {
                     assert::to_be_visible(&h, loc, multiline, timeout_ms).await?
@@ -390,6 +408,14 @@ async fn dispatch(op: Op, state: &State) -> Result<Response> {
                 } => assert::to_have_count(&h, loc, eq, min, max, multiline, timeout_ms).await?,
                 WaitCond::Exit => {
                     let code = h.wait_exit(timeout_ms).await?;
+                    state.record(
+                        &id,
+                        Recorded::Wait {
+                            cond: recorded_cond,
+                            ok: code.is_some(),
+                            timeout_ms,
+                        },
+                    );
                     return Ok(Response::Wait {
                         ok: code.is_some(),
                         actual: code
@@ -413,6 +439,14 @@ async fn dispatch(op: Op, state: &State) -> Result<Response> {
                 )
                 .await;
             let exit_code = h.info().await.ok().and_then(|i| i.exit_code);
+            state.record(
+                &id,
+                Recorded::Wait {
+                    cond: recorded_cond,
+                    ok: o.ok,
+                    timeout_ms,
+                },
+            );
             Ok(Response::Wait {
                 ok: o.ok,
                 actual: o.actual,
@@ -475,6 +509,29 @@ async fn dispatch(op: Op, state: &State) -> Result<Response> {
                 closed: vec![e.info.id],
             })
         }
+        Op::ExportSpec { id, name } => {
+            let t = state.table.lock().unwrap();
+            let key = t.names.get(&id).cloned().unwrap_or_else(|| id.clone());
+            let e = t
+                .sessions
+                .get(&key)
+                .ok_or_else(|| Error::NotFound(format!("no session `{id}`")))?;
+            let name = name
+                .or_else(|| e.info.name.clone())
+                .unwrap_or_else(|| e.info.id.clone());
+            let yaml = export::render(
+                &SpecHeader {
+                    name: &name,
+                    argv: &e.info.argv,
+                    profile: &e.info.profile,
+                    cols: e.open_cols,
+                    rows: e.open_rows,
+                    env: &e.env,
+                },
+                &e.recorded,
+            );
+            Ok(Response::Spec { yaml })
+        }
         Op::Shutdown => {
             let closed = close_all(state).await;
             state.shutdown.notify_one();
@@ -514,6 +571,7 @@ async fn open(
         sync.max_settle_ms = m;
     }
     let env_map: HashMap<String, String> = env.iter().cloned().collect();
+    let env_for_entry = env.clone();
     let handle = spawn_terminal(prof, cols, rows, argv.clone(), env_map, cwd, sync)?;
     let id = {
         let mut t = state.table.lock().unwrap();
@@ -564,6 +622,10 @@ async fn open(
             Entry {
                 handle,
                 info: info.clone(),
+                recorded: Vec::new(),
+                open_cols: cols,
+                open_rows: rows,
+                env: env_for_entry,
             },
         );
     }

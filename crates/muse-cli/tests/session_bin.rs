@@ -184,3 +184,94 @@ fn close_kills_the_program_group() {
     assert!(!alive, "background sleep {pid} survived close");
     run(&sock, &["serve", "--stop"]);
 }
+
+#[test]
+fn export_spec_round_trips_through_muse_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("muse.sock");
+    let (code, _) = run(
+        &sock,
+        &[
+            "session",
+            "open",
+            "--size",
+            "50x8",
+            "--name",
+            "rec",
+            "--",
+            "sh",
+            "-c",
+            "printf 'name? '; read n; echo \"hi $n\"; exec cat",
+        ],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        run(&sock, &["session", "wait", "rec", "--visible", "name?"]).0,
+        0
+    );
+    assert_eq!(
+        run(
+            &sock,
+            &["session", "send", "rec", "--text", "ada", "--key", "enter"]
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run(&sock, &["session", "wait", "rec", "--visible", "hi ada"]).0,
+        0
+    );
+    assert_eq!(
+        run(
+            &sock,
+            &[
+                "session",
+                "wait",
+                "rec",
+                "--visible",
+                "nope",
+                "--timeout-ms",
+                "50"
+            ]
+        )
+        .0,
+        1
+    );
+    let spec = dir.path().join("rec.yaml");
+    let (code, out) = run(
+        &sock,
+        &[
+            "session",
+            "export-spec",
+            "rec",
+            "--out",
+            spec.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{out}");
+    let yaml = std::fs::read_to_string(&spec).unwrap();
+    assert!(yaml.contains("- write: \"ada\""), "{yaml}");
+    assert!(
+        yaml.contains("- expect_visible: {text: \"hi ada\""),
+        "{yaml}"
+    );
+    assert!(yaml.contains("# did not hold"), "{yaml}");
+    run(&sock, &["serve", "--stop"]);
+
+    let out = muse(&sock)
+        .args([
+            "run",
+            spec.to_str().unwrap(),
+            "--artifacts",
+            "none",
+            "--snapshots-dir",
+        ])
+        .arg(dir.path().join("snaps"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
