@@ -790,10 +790,8 @@ impl vte::Perform for Term {
                     self.screen.title = Some(String::from_utf8_lossy(t).to_string());
                 }
             }
-            b"5379" => {
-                if params.get(1) == Some(&b"muse:ready".as_ref()) {
-                    self.ready_pulses += 1;
-                }
+            b"5379" if params.get(1) == Some(&b"muse:ready".as_ref()) => {
+                self.ready_pulses += 1;
             }
             _ => {}
         }
