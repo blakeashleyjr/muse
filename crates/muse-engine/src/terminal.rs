@@ -172,6 +172,11 @@ impl Terminal {
         self.last_stable = Some(screen.clone());
         let ts = self.ts();
         let gen = self.generation;
+        tracing::trace!(
+            generation = gen,
+            stable_run = self.stable_run,
+            "stable frame"
+        );
         if let Some(rec) = self.recorder.as_mut() {
             rec.on_frame(ts, gen, screen.clone());
         }
@@ -412,6 +417,7 @@ impl Terminal {
     fn terminate(&mut self) {
         if self.exit_code.is_none() {
             let st = self.pty.terminate(TERMINATE_GRACE);
+            tracing::debug!(pid = ?self.pty.pid(), code = st.code, "terminated SUT");
             self.exit_code = Some(st.code);
         }
     }

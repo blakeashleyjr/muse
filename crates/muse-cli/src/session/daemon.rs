@@ -234,9 +234,13 @@ async fn handle_conn(stream: UnixStream, state: Arc<State>) {
         )),
         Ok(req) => {
             state.touch();
+            tracing::debug!(op = ?req.op, "request");
             match dispatch(req.op, &state).await {
                 Ok(r) => r,
-                Err(e) => Response::error(e.to_string()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "request failed");
+                    Response::error(e.to_string())
+                }
             }
         }
         Err(e) => Response::error(format!("bad request: {e}")),
@@ -599,6 +603,7 @@ async fn open(
             .await?;
     }
     let pid = handle.info().await.ok().and_then(|i| i.pid);
+    tracing::info!(id, ?pid, argv = ?argv, "session opened");
     let info = SessionInfo {
         id: id.clone(),
         name: name.clone(),

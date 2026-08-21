@@ -7,7 +7,6 @@ pub mod session;
 pub mod trace_view;
 
 use clap::{Parser, Subcommand};
-use muse_core::config::SyncConfig;
 use muse_emulator::profile;
 use muse_runner::run::RunOpts;
 use muse_runner::spec::Spec;
@@ -21,8 +20,51 @@ use std::path::PathBuf;
     about = "Black-box e2e + visual-regression testing for terminal programs"
 )]
 pub struct Cli {
+    /// Config file (default: $MUSE_CONFIG, else ./muse.toml if present).
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub cmd: Cmd,
+}
+
+/// Install a `tracing` subscriber on stderr when `MUSE_LOG` is set (an
+/// env-filter directive such as `debug` or `muse_engine=trace`). Nothing is
+/// installed otherwise, so instrumentation is free.
+pub fn init_logging() {
+    let Some(filter) = std::env::var_os("MUSE_LOG") else {
+        return;
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from(filter.to_string_lossy().as_ref())
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    use std::io::IsTerminal;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_target(true)
+        .try_init();
+}
+
+/// Precedence: CLI flags > `MUSE_*` env > config file > built-in defaults.
+pub fn load_config(flag: Option<&std::path::Path>) -> Result<muse_core::Config, String> {
+    let path = flag
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("MUSE_CONFIG").map(PathBuf::from))
+        .or_else(|| {
+            let p = PathBuf::from("muse.toml");
+            p.exists().then_some(p)
+        });
+    let mut cfg = match &path {
+        Some(p) => {
+            let text =
+                std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
+            muse_core::Config::from_toml(&text).map_err(|e| format!("{}: {e}", p.display()))?
+        }
+        None => muse_core::Config::default(),
+    };
+    cfg.apply_env(std::env::vars());
+    cfg.validate().map_err(|e| e.to_string())?;
+    Ok(cfg)
 }
 
 #[derive(Subcommand, Debug)]
@@ -63,19 +105,24 @@ pub struct RunArgs {
     pub update_snapshots: bool,
     #[arg(long)]
     pub grep: Option<String>,
-    /// Shard as i/n.
+    /// Shard as i/n (0-indexed).
     #[arg(long)]
     pub shard: Option<String>,
-    #[arg(long, default_value_t = 0)]
-    pub retries: u32,
-    #[arg(long, default_value_t = 0)]
-    pub workers: usize,
-    #[arg(long, default_value = "pretty")]
-    pub reporter: String,
-    #[arg(long, default_value = "snapshots")]
-    pub snapshots_dir: String,
-    #[arg(long, default_value_t = 5000)]
-    pub deadline_ms: u64,
+    /// Retries per failing case [config: runner.retries, default 0].
+    #[arg(long)]
+    pub retries: Option<u32>,
+    /// Parallel cases; 0 = CPUs [config: runner.workers].
+    #[arg(long)]
+    pub workers: Option<usize>,
+    /// pretty | junit | json [config: runner.reporter].
+    #[arg(long)]
+    pub reporter: Option<String>,
+    /// Baseline directory [config: snapshots.dir, default `snapshots`].
+    #[arg(long)]
+    pub snapshots_dir: Option<String>,
+    /// Default assertion deadline [config: defaults.assert_deadline_ms, 5000].
+    #[arg(long)]
+    pub deadline_ms: Option<u64>,
     /// CI mode: a snapshot with no committed baseline fails instead of
     /// silently creating one.
     #[arg(long)]
@@ -100,10 +147,12 @@ pub struct ExecArgs {
     /// Command and arguments (after `--`).
     #[arg(required = true, num_args = 1.., last = true)]
     pub argv: Vec<String>,
-    #[arg(long, default_value = "xterm")]
-    pub profile: String,
-    #[arg(long, default_value = "80x24")]
-    pub size: String,
+    /// Emulation profile [config: defaults.profile, default xterm].
+    #[arg(long)]
+    pub profile: Option<String>,
+    /// Terminal size WxH [config: defaults.cols/rows, default 80x24].
+    #[arg(long)]
+    pub size: Option<String>,
     #[arg(long, default_value = "text")]
     pub kind: String,
     #[arg(long, default_value_t = 1)]
@@ -186,9 +235,17 @@ pub fn codegen_info() -> String {
 }
 
 pub(crate) async fn cmd_run(args: &RunArgs) -> Outcome {
+    cmd_run_with(args, None).await
+}
+
+async fn cmd_run_with(args: &RunArgs, config: Option<&std::path::Path>) -> Outcome {
     if args.specs.is_empty() {
         return Outcome::fail("no spec files given\n");
     }
+    let cfg = match load_config(config) {
+        Ok(c) => c,
+        Err(e) => return Outcome::fail(format!("config: {e}\n")),
+    };
     let mut specs = Vec::new();
     for path in &args.specs {
         let text = match std::fs::read_to_string(path) {
@@ -226,18 +283,33 @@ pub(crate) async fn cmd_run(args: &RunArgs) -> Outcome {
     } else {
         Some(PathBuf::from(&args.artifacts))
     };
+    let reporter = args
+        .reporter
+        .clone()
+        .unwrap_or_else(|| cfg.runner.reporter.clone());
     let opts = SuiteOpts {
         run: RunOpts {
-            sync: SyncConfig::default(),
-            assert_deadline_ms: args.deadline_ms,
-            snapshots_dir: args.snapshots_dir.clone(),
-            update_snapshots: args.update_snapshots,
+            sync: cfg.sync.clone(),
+            assert_deadline_ms: args.deadline_ms.unwrap_or(cfg.defaults.assert_deadline_ms),
+            snapshots_dir: args
+                .snapshots_dir
+                .clone()
+                .unwrap_or_else(|| cfg.snapshots.dir.clone()),
+            update_snapshots: args.update_snapshots || cfg.snapshots.update,
             forbid_create: args.ci || std::env::var_os("MUSE_CI").is_some(),
             artifacts_dir,
             trace,
+            default_normalize: cfg
+                .normalize
+                .iter()
+                .map(|n| muse_diff::normalize::NormalizeRule {
+                    re: n.re.clone(),
+                    replace: n.replace.clone(),
+                })
+                .collect(),
         },
-        retries: args.retries,
-        workers: args.workers,
+        retries: args.retries.unwrap_or(cfg.runner.retries),
+        workers: args.workers.unwrap_or(cfg.runner.workers),
         only_profiles: None,
         grep: args.grep.clone(),
         shard,
@@ -245,7 +317,7 @@ pub(crate) async fn cmd_run(args: &RunArgs) -> Outcome {
         case_timeout_ms: args.case_timeout_ms,
     };
     let result = muse_runner::run_suite(&specs, &opts).await;
-    let report = match args.reporter.as_str() {
+    let report = match reporter.as_str() {
         "junit" => result.junit(),
         "json" => result.json(),
         _ => result.pretty(),
@@ -257,17 +329,28 @@ pub(crate) async fn cmd_run(args: &RunArgs) -> Outcome {
     }
 }
 
-async fn cmd_exec(args: &ExecArgs) -> Outcome {
-    let (cols, rows) = match muse_runner::spec::parse_size(&args.size) {
-        Some(v) => v,
-        None => return Outcome::fail(format!("bad size {}\n", args.size)),
+async fn cmd_exec(args: &ExecArgs, config: Option<&std::path::Path>) -> Outcome {
+    let cfg = match load_config(config) {
+        Ok(c) => c,
+        Err(e) => return Outcome::fail(format!("config: {e}\n")),
+    };
+    let (cols, rows) = match &args.size {
+        Some(sz) => match muse_runner::spec::parse_size(sz) {
+            Some(v) => v,
+            None => return Outcome::fail(format!("bad size {sz}\n")),
+        },
+        None => (cfg.defaults.cols, cfg.defaults.rows),
     };
     let opts = exec::ExecOpts {
-        profile: args.profile.clone(),
+        profile: args
+            .profile
+            .clone()
+            .unwrap_or_else(|| cfg.defaults.profile.clone()),
         cols,
         rows,
         kind: exec::parse_kind(&args.kind, args.scale),
         deadline_ms: args.deadline_ms,
+        sync: cfg.sync.clone(),
     };
     match exec::exec(args.argv.clone(), &opts).await {
         Ok(snap) => {
@@ -304,8 +387,8 @@ async fn cmd_trace(args: &TraceArgs) -> Outcome {
 /// Dispatch a parsed CLI to an outcome.
 pub async fn dispatch(cli: Cli) -> Outcome {
     match cli.cmd {
-        Cmd::Run(args) => cmd_run(&args).await,
-        Cmd::Exec(args) => cmd_exec(&args).await,
+        Cmd::Run(args) => cmd_run_with(&args, cli.config.as_deref()).await,
+        Cmd::Exec(args) => cmd_exec(&args, cli.config.as_deref()).await,
         Cmd::Trace(args) => cmd_trace(&args).await,
         Cmd::Doctor => {
             let r = doctor::run().await;
@@ -499,6 +582,94 @@ mod tests {
         .unwrap();
         let o = dispatch(cli).await;
         assert!(o.stdout.contains("\"cases\""));
+    }
+
+    #[tokio::test]
+    async fn config_file_sets_defaults_and_flags_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("t.yaml");
+        std::fs::write(
+            &spec_path,
+            "name: t\nspawn: [\"echo\", \"2024-01-02T03:04:05 stamp\"]\nsteps:\n  - expect_visible: {text: \"stamp\"}\n  - snapshot: {name: s, kind: text}\n",
+        )
+        .unwrap();
+        let snaps = dir.path().join("cfg-snaps");
+        let cfg_path = dir.path().join("muse.toml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "[runner]\nreporter = \"json\"\n[snapshots]\ndir = \"{}\"\n[[normalize]]\nre = '\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}'\nreplace = \"<TS>\"\n",
+                snaps.display()
+            ),
+        )
+        .unwrap();
+        // reporter + snapshots dir + normalize all come from the file
+        let cli = Cli::try_parse_from([
+            "muse",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "run",
+            spec_path.to_str().unwrap(),
+            "--profile",
+            "xterm",
+            "--size",
+            "40x10",
+            "--artifacts",
+            "none",
+        ])
+        .unwrap();
+        let o = dispatch(cli).await;
+        assert!(o.success, "{}", o.stdout);
+        assert!(
+            o.stdout.contains("\"cases\""),
+            "json reporter from config: {}",
+            o.stdout
+        );
+        assert!(snaps.exists(), "snapshots dir from config");
+        // the baseline was normalized before being written? No — normalize
+        // applies at compare time; a second run with a different stamp must
+        // still match thanks to the config-level rule.
+        std::fs::write(
+            &spec_path,
+            "name: t\nspawn: [\"echo\", \"2031-12-31T23:59:59 stamp\"]\nsteps:\n  - expect_visible: {text: \"stamp\"}\n  - snapshot: {name: s, kind: text}\n",
+        )
+        .unwrap();
+        let cli = Cli::try_parse_from([
+            "muse",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "run",
+            spec_path.to_str().unwrap(),
+            "--profile",
+            "xterm",
+            "--size",
+            "40x10",
+            "--artifacts",
+            "none",
+            "--reporter",
+            "pretty",
+        ])
+        .unwrap();
+        let o = dispatch(cli).await;
+        assert!(o.success, "{}", o.stdout);
+        assert!(
+            o.stdout.contains("[PASS]"),
+            "flag overrides config reporter: {}",
+            o.stdout
+        );
+        assert!(o.stdout.contains("snapshot s: match"), "{}", o.stdout);
+        // bad config is an error, not ignored
+        std::fs::write(&cfg_path, "[defaults]\ncols = 0\n").unwrap();
+        let cli = Cli::try_parse_from([
+            "muse",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "run",
+            spec_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        let o = dispatch(cli).await;
+        assert!(!o.success && o.stdout.contains("config:"), "{}", o.stdout);
     }
 
     #[tokio::test]

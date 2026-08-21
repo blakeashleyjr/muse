@@ -51,6 +51,9 @@ pub struct RunOpts {
     /// `None` disables artifacts entirely.
     pub artifacts_dir: Option<PathBuf>,
     pub trace: TraceMode,
+    /// Normalize rules applied to every snapshot (from `[[normalize]]` in
+    /// muse.toml), after the spec's own rules.
+    pub default_normalize: Vec<muse_diff::normalize::NormalizeRule>,
 }
 
 impl Default for RunOpts {
@@ -63,6 +66,7 @@ impl Default for RunOpts {
             forbid_create: false,
             artifacts_dir: Some(PathBuf::from("test-results")),
             trace: TraceMode::RetainOnFailure,
+            default_normalize: Vec::new(),
         }
     }
 }
@@ -259,6 +263,12 @@ pub async fn run_case(
     }
 
     result.duration_ms = t0.elapsed().as_millis() as u64;
+    tracing::info!(
+        case = %result.case_id(),
+        passed = result.passed(),
+        ms = result.duration_ms,
+        "case finished"
+    );
     if let Some(dir) = &case_dir {
         let keep = !result.passed() || opts.trace == TraceMode::On;
         if keep {
@@ -384,6 +394,7 @@ async fn run_steps(
                 if let Some(d) = defaults {
                     normalize.extend(d.normalize_rules());
                 }
+                normalize.extend(opts.default_normalize.iter().cloned());
                 let s = handle.snapshot(kind, 1, dl).await.map_err(es)?;
                 let diff_opts = DiffOptions {
                     masks,
