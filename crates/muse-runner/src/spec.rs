@@ -106,7 +106,8 @@ pub struct KeySpec {
 impl KeySpec {
     pub fn to_event(&self) -> Result<KeyEvent> {
         let key = match self.key.as_str() {
-            "enter" => Key::Enter,
+            "enter" | "return" => Key::Enter,
+            "space" => Key::Char(' '),
             "tab" => Key::Tab,
             "backspace" => Key::Backspace,
             "escape" | "esc" => Key::Escape,

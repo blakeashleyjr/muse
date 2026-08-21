@@ -138,6 +138,10 @@ mod tests {
         );
         assert_eq!(parse_chord("+").unwrap(), KeyEvent::new(Key::Char('+')));
         assert_eq!(
+            parse_chord("ctrl+space").unwrap(),
+            KeyEvent::with(Key::Char(' '), Mods::CTRL)
+        );
+        assert_eq!(
             parse_chord("ctrl++").unwrap(),
             KeyEvent::with(Key::Char('+'), Mods::CTRL)
         );
