@@ -225,11 +225,12 @@ pub fn profiles_table() -> String {
 }
 
 pub fn codegen_info() -> String {
-    "SDK base clients are generated from proto/muse/v1/muse.proto via buf:\n  \
-     buf generate   # Go, TS, Python, C++ bases into sdks/*\n\
-     Rust client/server are generated in-build via tonic-build.\n\
-     Hand-written sugar layers live alongside the generated bases (§16, §18).\n\
-     The embedded (in-process) engine used by `muse run`/`exec` needs no codegen.\n"
+    "Language SDKs are a roadmap item: proto/muse/v1/muse.proto is the intended\n\
+     contract and `buf generate` (proto/buf.gen.yaml) would emit Go/TS/Python/C++\n\
+     bases into sdks/*, but no SDK ships yet and nothing in this binary uses the\n\
+     proto. What exists today: the embedded engine (`muse run`/`exec`), the\n\
+     session daemon (`muse serve`, NDJSON over a unix socket — see\n\
+     crates/muse-cli/src/session/proto.rs), and `muse mcp` for agent hosts.\n"
         .to_string()
 }
 
