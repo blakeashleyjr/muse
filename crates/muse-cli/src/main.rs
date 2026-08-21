@@ -7,9 +7,5 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = dispatch(cli).await;
     print!("{}", outcome.stdout);
-    if outcome.success {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    ExitCode::from(outcome.code)
 }

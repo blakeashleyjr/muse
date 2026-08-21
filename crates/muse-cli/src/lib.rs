@@ -3,6 +3,7 @@
 pub mod conformance;
 pub mod doctor;
 pub mod exec;
+pub mod session;
 pub mod trace_view;
 
 use clap::{Parser, Subcommand};
@@ -38,6 +39,10 @@ pub enum Cmd {
     Profiles,
     /// Run emulator + protocol conformance corpora from a directory.
     Conformance(ConfArgs),
+    /// Drive a program interactively across commands (open/send/snap/wait/…).
+    Session(session::SessionArgs),
+    /// Run the session daemon (normally started on demand by `session open`).
+    Serve(session::ServeArgs),
     /// Information about generating language SDKs.
     Codegen,
 }
@@ -123,10 +128,13 @@ pub struct ConfArgs {
     pub snapshots_dir: String,
 }
 
-/// Outcome of a command: text to print and process success.
+/// Outcome of a command: text to print and the process exit code
+/// (0 ok, 1 the program under test did something unexpected, 2 muse itself
+/// / the daemon / the transport failed).
 pub struct Outcome {
     pub stdout: String,
     pub success: bool,
+    pub code: u8,
 }
 
 impl Outcome {
@@ -134,12 +142,14 @@ impl Outcome {
         Outcome {
             stdout: stdout.into(),
             success: true,
+            code: 0,
         }
     }
     fn fail(stdout: impl Into<String>) -> Outcome {
         Outcome {
             stdout: stdout.into(),
             success: false,
+            code: 1,
         }
     }
 }
@@ -241,6 +251,7 @@ async fn cmd_run(args: &RunArgs) -> Outcome {
     Outcome {
         stdout: report,
         success: result.passed(),
+        code: u8::from(!result.passed()),
     }
 }
 
@@ -298,6 +309,7 @@ pub async fn dispatch(cli: Cli) -> Outcome {
             let r = doctor::run().await;
             Outcome {
                 success: r.self_test_ok,
+                code: u8::from(!r.self_test_ok),
                 stdout: r.render(),
             }
         }
@@ -306,10 +318,13 @@ pub async fn dispatch(cli: Cli) -> Outcome {
             let s = conformance::run_dir(&args.dir, &args.snapshots_dir).await;
             Outcome {
                 success: s.ok(),
+                code: u8::from(!s.ok()),
                 stdout: s.render(),
             }
         }
         Cmd::Codegen => Outcome::ok(codegen_info()),
+        Cmd::Session(args) => session::cmd_session(&args).await,
+        Cmd::Serve(args) => session::cmd_serve(&args).await,
     }
 }
 
