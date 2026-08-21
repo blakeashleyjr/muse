@@ -34,8 +34,7 @@ pub fn init_logging() {
     let Some(filter) = std::env::var_os("MUSE_LOG") else {
         return;
     };
-    let filter = tracing_subscriber::EnvFilter::try_from(filter.to_string_lossy().as_ref())
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let filter = tracing_subscriber::EnvFilter::new(filter.to_string_lossy().as_ref());
     use std::io::IsTerminal;
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
