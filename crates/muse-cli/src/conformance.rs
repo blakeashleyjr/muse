@@ -13,8 +13,10 @@ pub struct ConfSummary {
 }
 
 impl ConfSummary {
+    /// Green only if something actually ran: an empty corpus directory is a
+    /// misconfiguration, not a pass.
     pub fn ok(&self) -> bool {
-        self.failed == 0
+        self.failed == 0 && self.passed > 0
     }
     pub fn render(&self) -> String {
         let mut s = String::new();
@@ -38,16 +40,24 @@ impl ConfSummary {
     }
 }
 
+/// Every `*.yaml` under `dir`, recursively — the shipped corpora live in
+/// `conformance/{emulator,protocol}/`, so the documented `muse conformance
+/// conformance` invocation must descend.
 fn yaml_files(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("yaml") {
-                out.push(p);
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("yaml") {
+                    out.push(p);
+                }
             }
         }
     }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
     out.sort();
     out
 }
@@ -87,6 +97,7 @@ pub async fn run_dir(dir: &Path, snapshots_dir: &str) -> ConfSummary {
                 let opts = RunOpts {
                     assert_deadline_ms: 3000,
                     snapshots_dir: snapshots_dir.to_string(),
+                    artifacts_dir: None,
                     ..Default::default()
                 };
                 let profiles = spec.matrix.profiles_or_default();
@@ -159,11 +170,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_dir_ok() {
+    async fn empty_dir_is_not_ok() {
+        // An empty corpus must not read as green.
         let dir = tempfile::tempdir().unwrap();
         let sum = run_dir(dir.path(), "snaps").await;
-        assert!(sum.ok());
+        assert!(!sum.ok());
         assert_eq!(sum.passed, 0);
+    }
+
+    #[tokio::test]
+    async fn corpus_root_is_walked_recursively() {
+        // `muse conformance conformance` (the documented invocation) must find
+        // the cases under conformance/{emulator,protocol}/.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance");
+        let snaps = tempfile::tempdir().unwrap();
+        let sum = run_dir(&root, snaps.path().to_str().unwrap()).await;
+        assert!(sum.ok(), "{}", sum.render());
+        assert!(sum.passed >= 7);
     }
 
     #[tokio::test]

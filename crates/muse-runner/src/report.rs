@@ -27,6 +27,12 @@ pub struct CaseResult {
     pub error: Option<String>,
     #[serde(default)]
     pub flaky: bool,
+    /// Directory holding this case's failure artifacts (final screen, diffs,
+    /// trace), when any were kept.
+    #[serde(default)]
+    pub artifacts: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 impl CaseResult {
@@ -47,11 +53,15 @@ impl CaseResult {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SuiteResult {
     pub cases: Vec<CaseResult>,
+    /// A suite-level problem (bad shard, nothing selected): the run is a
+    /// failure even if every case that did run passed.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 impl SuiteResult {
     pub fn passed(&self) -> bool {
-        self.cases.iter().all(|c| c.passed())
+        self.error.is_none() && self.cases.iter().all(|c| c.passed())
     }
     pub fn total(&self) -> usize {
         self.cases.len()
@@ -83,6 +93,12 @@ impl SuiteResult {
             if c.flaky {
                 s.push_str("       (flaky: failed then passed on retry)\n");
             }
+            if let Some(a) = &c.artifacts {
+                s.push_str(&format!("       artifacts: {a}\n"));
+            }
+        }
+        if let Some(e) = &self.error {
+            s.push_str(&format!("\nerror: {e}\n"));
         }
         s.push_str(&format!(
             "\n{} passed, {} failed, {} total\n",
@@ -113,9 +129,10 @@ impl SuiteResult {
         ));
         for c in &self.cases {
             s.push_str(&format!(
-                "    <testcase name=\"{}\" classname=\"{}\">\n",
+                "    <testcase name=\"{}\" classname=\"{}\" time=\"{:.3}\">\n",
                 xml_escape(&c.case_id()),
-                xml_escape(&c.profile)
+                xml_escape(&c.profile),
+                c.duration_ms as f64 / 1000.0
             ));
             if !c.passed() {
                 let mut msg = String::new();
@@ -133,6 +150,12 @@ impl SuiteResult {
                     xml_escape(&msg)
                 ));
             }
+            if let Some(a) = &c.artifacts {
+                s.push_str(&format!(
+                    "      <system-out>artifacts: {}</system-out>\n",
+                    xml_escape(a)
+                ));
+            }
             s.push_str("    </testcase>\n");
         }
         s.push_str("  </testsuite>\n</testsuites>\n");
@@ -141,7 +164,12 @@ impl SuiteResult {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
+    // Control characters (ESC from a styled diff, NUL…) are illegal in XML 1.0
+    // attribute values even when escaped; drop them so the document stays valid.
+    s.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect::<String>()
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
@@ -169,6 +197,8 @@ mod tests {
             }],
             error: None,
             flaky: false,
+            artifacts: None,
+            duration_ms: 0,
         }
     }
 
@@ -184,6 +214,7 @@ mod tests {
     #[test]
     fn suite_counts() {
         let suite = SuiteResult {
+            error: None,
             cases: vec![case(true), case(false)],
         };
         assert_eq!(suite.total(), 2);
@@ -194,6 +225,7 @@ mod tests {
     #[test]
     fn pretty_output() {
         let suite = SuiteResult {
+            error: None,
             cases: vec![case(true), case(false)],
         };
         let p = suite.pretty();
@@ -205,6 +237,7 @@ mod tests {
     #[test]
     fn junit_valid_ish() {
         let suite = SuiteResult {
+            error: None,
             cases: vec![case(false)],
         };
         let x = suite.junit();
@@ -216,6 +249,7 @@ mod tests {
     #[test]
     fn json_output() {
         let suite = SuiteResult {
+            error: None,
             cases: vec![case(true)],
         };
         let j = suite.json();
@@ -236,7 +270,10 @@ mod tests {
     fn flaky_note() {
         let mut c = case(true);
         c.flaky = true;
-        let suite = SuiteResult { cases: vec![c] };
+        let suite = SuiteResult {
+            cases: vec![c],
+            error: None,
+        };
         assert!(suite.pretty().contains("flaky"));
     }
 
@@ -249,7 +286,10 @@ mod tests {
             outcome: "mismatch: pixels".into(),
             passed: false,
         }];
-        let suite = SuiteResult { cases: vec![c] };
+        let suite = SuiteResult {
+            cases: vec![c],
+            error: None,
+        };
         let x = suite.junit();
         assert!(x.contains("spawn boom &lt;crash&gt;"));
         assert!(x.contains("snapshot s: mismatch"));
@@ -259,7 +299,10 @@ mod tests {
     fn pretty_shows_error_line() {
         let mut c = case(true);
         c.error = Some("kaboom".into());
-        let suite = SuiteResult { cases: vec![c] };
+        let suite = SuiteResult {
+            cases: vec![c],
+            error: None,
+        };
         assert!(suite.pretty().contains("error: kaboom"));
     }
 

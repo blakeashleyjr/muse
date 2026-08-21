@@ -1,0 +1,23 @@
+{
+  "alt_screen": false,
+  "cols": 30,
+  "cursor": {
+    "col": 0,
+    "row": 1,
+    "shape": "block",
+    "visible": true
+  },
+  "generation": 2,
+  "modes": {
+    "alt_screen": false,
+    "app_cursor_keys": false,
+    "app_keypad": false,
+    "bracketed_paste": false,
+    "kitty_kbd_flags": 0,
+    "mouse": "off",
+    "mouse_encoding": "default",
+    "sync_output": false
+  },
+  "rows": 8,
+  "title": null
+}

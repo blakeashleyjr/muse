@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "profile": "xterm",
+  "cols": 30,
+  "rows": 8,
+  "env": [],
+  "started_at": 1787349900,
+  "sut_argv": [
+    "echo",
+    "x"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "f",
+  "profile": "xterm",
+  "cols": 30,
+  "rows": 8,
+  "assertions": [
+    {
+      "kind": "toBeVisible",
+      "ok": false,
+      "detail": "no match before deadline"
+    }
+  ],
+  "snapshots": [],
+  "error": null,
+  "flaky": false,
+  "artifacts": null,
+  "duration_ms": 324
+}

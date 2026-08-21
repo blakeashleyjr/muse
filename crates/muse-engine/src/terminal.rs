@@ -55,6 +55,12 @@ pub enum TermCmd {
         deadline: Instant,
         tx: oneshot::Sender<Option<u32>>,
     },
+    /// Record an assertion verdict into the active trace step.
+    RecordAssertion {
+        kind: String,
+        ok: bool,
+        detail: String,
+    },
     /// The live screen right now (no settling) plus the stable-frame generation.
     Screen(oneshot::Sender<(Screen, u64)>),
     /// Process facts: pid, exit code (if exited), whether output hit EOF.
@@ -379,6 +385,11 @@ impl Terminal {
                     self.exit_waiters.push((deadline, tx));
                 }
             }
+            TermCmd::RecordAssertion { kind, ok, detail } => {
+                if let Some(rec) = self.recorder.as_mut() {
+                    rec.on_assertion(kind, ok, detail);
+                }
+            }
             TermCmd::Screen(tx) => {
                 let _ = tx.send((self.emu.snapshot_screen(), self.generation));
             }
@@ -575,6 +586,21 @@ impl TerminalHandle {
 
     pub async fn end_step(&self) -> Result<()> {
         self.send(TermCmd::EndStep).await
+    }
+
+    /// Record an assertion verdict into the trace (no-op without a trace).
+    pub async fn record_assertion(
+        &self,
+        kind: impl Into<String>,
+        ok: bool,
+        detail: impl Into<String>,
+    ) -> Result<()> {
+        self.send(TermCmd::RecordAssertion {
+            kind: kind.into(),
+            ok,
+            detail: detail.into(),
+        })
+        .await
     }
 
     pub async fn set_profile(&self, profile: Profile) -> Result<()> {

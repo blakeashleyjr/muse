@@ -69,6 +69,23 @@ pub struct RunArgs {
     pub snapshots_dir: String,
     #[arg(long, default_value_t = 5000)]
     pub deadline_ms: u64,
+    /// CI mode: a snapshot with no committed baseline fails instead of
+    /// silently creating one.
+    #[arg(long)]
+    pub ci: bool,
+    /// Accept a run that selected zero cases.
+    #[arg(long)]
+    pub allow_empty: bool,
+    /// Per-case wall-clock cap in ms (0 = none).
+    #[arg(long, default_value_t = 120_000)]
+    pub case_timeout_ms: u64,
+    /// Where failure artifacts (final screen, diffs, trace) are written.
+    /// `none` disables them.
+    #[arg(long, default_value = "test-results")]
+    pub artifacts: String,
+    /// Trace recording: on | retain-on-failure | off.
+    #[arg(long, default_value = "retain-on-failure")]
+    pub trace: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -183,18 +200,37 @@ async fn cmd_run(args: &RunArgs) -> Outcome {
         let (i, n) = s.split_once('/')?;
         Some((i.parse().ok()?, n.parse().ok()?))
     });
+    let trace = match muse_runner::run::TraceMode::parse(&args.trace) {
+        Some(t) => t,
+        None => {
+            return Outcome::fail(format!(
+                "bad --trace {:?}: expected on | retain-on-failure | off\n",
+                args.trace
+            ))
+        }
+    };
+    let artifacts_dir = if args.artifacts == "none" {
+        None
+    } else {
+        Some(PathBuf::from(&args.artifacts))
+    };
     let opts = SuiteOpts {
         run: RunOpts {
             sync: SyncConfig::default(),
             assert_deadline_ms: args.deadline_ms,
             snapshots_dir: args.snapshots_dir.clone(),
             update_snapshots: args.update_snapshots,
+            forbid_create: args.ci || std::env::var_os("MUSE_CI").is_some(),
+            artifacts_dir,
+            trace,
         },
         retries: args.retries,
         workers: args.workers,
         only_profiles: None,
         grep: args.grep.clone(),
         shard,
+        allow_empty: args.allow_empty,
+        case_timeout_ms: args.case_timeout_ms,
     };
     let result = muse_runner::run_suite(&specs, &opts).await;
     let report = match args.reporter.as_str() {
