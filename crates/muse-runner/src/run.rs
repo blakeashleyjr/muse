@@ -248,18 +248,13 @@ pub async fn run_case(
         }
     }
 
-    if let Err(e) = run_steps(
-        spec,
-        &handle,
+    let ctx = CaseCtx {
         cols,
         rows,
-        opts,
-        &mut result,
-        &case_tmp,
-        case_dir.as_deref(),
-    )
-    .await
-    {
+        case_tmp: case_tmp.clone(),
+        case_dir: case_dir.clone(),
+    };
+    if let Err(e) = run_steps(spec, &handle, opts, &mut result, &ctx).await {
         result.error = Some(e);
     }
 
@@ -281,16 +276,24 @@ pub async fn run_case(
     result
 }
 
+/// Per-case facts the step loop needs.
+struct CaseCtx {
+    cols: u16,
+    rows: u16,
+    case_tmp: String,
+    case_dir: Option<PathBuf>,
+}
+
 async fn run_steps(
     spec: &Spec,
     handle: &TerminalHandle,
-    cols: u16,
-    rows: u16,
     opts: &RunOpts,
     result: &mut CaseResult,
-    case_tmp: &str,
-    case_dir: Option<&Path>,
+    ctx: &CaseCtx,
 ) -> Result<(), String> {
+    let CaseCtx { cols, rows, .. } = *ctx;
+    let case_tmp = ctx.case_tmp.as_str();
+    let case_dir = ctx.case_dir.as_deref();
     let store = Baselines::new(&opts.snapshots_dir, opts.update_snapshots);
     let dl = opts.assert_deadline_ms;
     // Per-path byte cursor for watch_log steps.
