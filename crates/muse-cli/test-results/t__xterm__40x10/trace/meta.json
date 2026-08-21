@@ -4,7 +4,7 @@
   "cols": 40,
   "rows": 10,
   "env": [],
-  "started_at": 1787351514,
+  "started_at": 1787351804,
   "sut_argv": [
     "echo",
     "clihi"

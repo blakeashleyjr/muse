@@ -4,7 +4,7 @@
   "cols": 30,
   "rows": 8,
   "env": [],
-  "started_at": 1787351517,
+  "started_at": 1787351807,
   "sut_argv": [
     "echo",
     "x"

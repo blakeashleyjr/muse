@@ -14,6 +14,7 @@
     "app_keypad": false,
     "bracketed_paste": false,
     "kitty_kbd_flags": 0,
+    "modify_other_keys": 0,
     "mouse": "off",
     "mouse_encoding": "default",
     "sync_output": false

@@ -40,7 +40,11 @@ pub struct ModeState {
     pub mouse_encoding: MouseEnc,
     /// DEC 2026 — synchronized output in progress.
     pub sync_output: bool,
+    /// Kitty keyboard protocol flags currently in effect (top of the push
+    /// stack); 0 = legacy encoding.
     pub kitty_kbd_flags: u8,
+    /// xterm `modifyOtherKeys` level (`CSI > 4 ; n m`); 0 = off.
+    pub modify_other_keys: u8,
     pub alt_screen: bool,
 }
 
