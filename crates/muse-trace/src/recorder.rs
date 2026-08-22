@@ -161,7 +161,7 @@ impl Trace {
 
     /// The frame active at time `ts` (last frame with frame.ts <= ts).
     pub fn frame_at(&self, ts: f64) -> Option<&FrameRecord> {
-        self.frames.iter().filter(|f| f.ts <= ts).next_back()
+        self.frames.iter().rfind(|f| f.ts <= ts)
     }
 }
 

@@ -14,6 +14,81 @@ use vte::Params;
 const MAX_SCROLLBACK: usize = 1000;
 
 /// Terminal state + parser performer.
+/// Which terminal features this emulator admits to having. Mirrors the
+/// profile's capabilities so that a program probing (DECRQM, `CSI ? u`) or
+/// negotiating (`CSI ? 2026 h`, `CSI > 1 u`) gets the answer the profiled
+/// terminal would give — and so a spec run under `vt220` really does catch
+/// "this app assumes bracketed paste".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TermCaps {
+    pub kitty_keyboard: bool,
+    pub modify_other_keys: bool,
+    pub sync_output: bool,
+    pub bracketed_paste: bool,
+    pub mouse: bool,
+    /// XTVERSION (`CSI > q`) reply, if the profiled terminal answers it.
+    pub xtversion: Option<String>,
+}
+
+impl Default for TermCaps {
+    fn default() -> Self {
+        TermCaps {
+            kitty_keyboard: false,
+            modify_other_keys: true,
+            sync_output: true,
+            bracketed_paste: true,
+            mouse: true,
+            xtversion: Some("XTerm(390)".into()),
+        }
+    }
+}
+
+/// G0/G1 character set designation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum Charset {
+    #[default]
+    Ascii,
+    /// DEC Special Graphics (`ESC ( 0`): box-drawing in 0x60..=0x7e.
+    DecGraphics,
+}
+
+fn dec_graphics(c: char) -> char {
+    match c {
+        '`' => '◆',
+        'a' => '▒',
+        'b' => '␉',
+        'c' => '␌',
+        'd' => '␍',
+        'e' => '␊',
+        'f' => '°',
+        'g' => '±',
+        'h' => '␤',
+        'i' => '␋',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺',
+        'p' => '⎻',
+        'q' => '─',
+        'r' => '⎼',
+        's' => '⎽',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        other => other,
+    }
+}
+
 pub struct Term {
     pub screen: Screen,
     pen: CellStyle,
@@ -31,6 +106,13 @@ pub struct Term {
     da2: Vec<u8>,
     /// Count of cooperative `muse:ready` OSC pulses seen.
     pub ready_pulses: u32,
+    pub caps: TermCaps,
+    /// Kitty keyboard flag stack (`CSI > flags u` pushes, `CSI < u` pops).
+    kitty_stack: Vec<u8>,
+    g0: Charset,
+    g1: Charset,
+    /// SO (0x0e) selected G1; SI (0x0f) back to G0.
+    shift_out: bool,
 }
 
 impl Term {
@@ -49,7 +131,92 @@ impl Term {
             da1,
             da2,
             ready_pulses: 0,
+            caps: TermCaps::default(),
+            kitty_stack: Vec::new(),
+            g0: Charset::Ascii,
+            g1: Charset::Ascii,
+            shift_out: false,
         }
+    }
+
+    pub fn set_caps(&mut self, caps: TermCaps) {
+        self.caps = caps;
+    }
+
+    fn active_charset(&self) -> Charset {
+        if self.shift_out {
+            self.g1
+        } else {
+            self.g0
+        }
+    }
+
+    fn sync_kitty_flags(&mut self) {
+        self.screen.modes.kitty_kbd_flags = self.kitty_stack.last().copied().unwrap_or(0);
+    }
+
+    /// `CSI … u` family: kitty keyboard protocol push/pop/set/query.
+    fn kitty_keyboard(&mut self, params: &Params, intermediates: &[u8]) {
+        if !self.caps.kitty_keyboard {
+            return; // a terminal without the protocol ignores these
+        }
+        match intermediates.first() {
+            Some(b'>') => {
+                let flags = praw(params, 0, 0) as u8;
+                self.kitty_stack.push(flags);
+            }
+            Some(b'<') => {
+                let n = pn(params, 0, 1) as usize;
+                for _ in 0..n {
+                    self.kitty_stack.pop();
+                }
+            }
+            Some(b'=') => {
+                let flags = praw(params, 0, 0) as u8;
+                let mode = praw(params, 1, 1);
+                let cur = self.kitty_stack.last().copied().unwrap_or(0);
+                let new = match mode {
+                    2 => cur | flags,
+                    3 => cur & !flags,
+                    _ => flags,
+                };
+                match self.kitty_stack.last_mut() {
+                    Some(top) => *top = new,
+                    None => self.kitty_stack.push(new),
+                }
+            }
+            Some(b'?') => {
+                let cur = self.kitty_stack.last().copied().unwrap_or(0);
+                self.replies
+                    .extend_from_slice(format!("\x1b[?{cur}u").as_bytes());
+            }
+            _ => {}
+        }
+        self.sync_kitty_flags();
+    }
+
+    /// DECRQM: report the real state of a DEC private mode (1 set, 2 reset),
+    /// or 0 for one this terminal doesn't have.
+    fn report_dec_mode(&mut self, mode: u16) {
+        let m = &self.screen.modes;
+        let state = |on: bool| if on { 1 } else { 2 };
+        let value = match mode {
+            1 => state(m.app_cursor_keys),
+            7 => state(self.autowrap),
+            25 => state(self.screen.cursor.visible),
+            47 | 1047 | 1049 => state(m.alt_screen),
+            1000 if self.caps.mouse => state(m.mouse == MouseMode::Normal),
+            1002 if self.caps.mouse => state(m.mouse == MouseMode::ButtonEvent),
+            1003 if self.caps.mouse => state(m.mouse == MouseMode::AnyEvent),
+            1005 if self.caps.mouse => state(m.mouse_encoding == MouseEnc::Utf8),
+            1006 if self.caps.mouse => state(m.mouse_encoding == MouseEnc::Sgr),
+            1015 if self.caps.mouse => state(m.mouse_encoding == MouseEnc::Urxvt),
+            2004 if self.caps.bracketed_paste => state(m.bracketed_paste),
+            2026 if self.caps.sync_output => state(m.sync_output),
+            _ => 0,
+        };
+        self.replies
+            .extend_from_slice(format!("\x1b[?{mode};{value}$y").as_bytes());
     }
 
     fn dims(&self) -> (u16, u16) {
@@ -363,47 +530,47 @@ impl Term {
             1 => self.screen.modes.app_cursor_keys = on,
             7 => self.autowrap = on,
             25 => self.screen.cursor.visible = on,
-            1000 => {
+            1000 if self.caps.mouse => {
                 self.screen.modes.mouse = if on {
                     MouseMode::Normal
                 } else {
                     MouseMode::Off
                 }
             }
-            1002 => {
+            1002 if self.caps.mouse => {
                 self.screen.modes.mouse = if on {
                     MouseMode::ButtonEvent
                 } else {
                     MouseMode::Off
                 }
             }
-            1003 => {
+            1003 if self.caps.mouse => {
                 self.screen.modes.mouse = if on {
                     MouseMode::AnyEvent
                 } else {
                     MouseMode::Off
                 }
             }
-            1005 => {
+            1005 if self.caps.mouse => {
                 self.screen.modes.mouse_encoding = if on {
                     MouseEnc::Utf8
                 } else {
                     MouseEnc::Default
                 }
             }
-            1006 => {
+            1006 if self.caps.mouse => {
                 self.screen.modes.mouse_encoding =
                     if on { MouseEnc::Sgr } else { MouseEnc::Default }
             }
-            1015 => {
+            1015 if self.caps.mouse => {
                 self.screen.modes.mouse_encoding = if on {
                     MouseEnc::Urxvt
                 } else {
                     MouseEnc::Default
                 }
             }
-            2004 => self.screen.modes.bracketed_paste = on,
-            2026 => self.screen.modes.sync_output = on,
+            2004 if self.caps.bracketed_paste => self.screen.modes.bracketed_paste = on,
+            2026 if self.caps.sync_output => self.screen.modes.sync_output = on,
             47 | 1047 => self.set_alt(on, false),
             1049 => self.set_alt(on, true),
             1048 => {
@@ -609,6 +776,11 @@ fn praw(params: &Params, idx: usize, dflt: u16) -> u16 {
 
 impl vte::Perform for Term {
     fn print(&mut self, c: char) {
+        let c = if self.active_charset() == Charset::DecGraphics {
+            dec_graphics(c)
+        } else {
+            c
+        };
         self.print_glyph(c);
     }
 
@@ -621,6 +793,8 @@ impl vte::Perform for Term {
             0x09 => self.tab(),
             0x0a..=0x0c => self.line_feed(),
             0x0d => self.carriage_return(),
+            0x0e => self.shift_out = true,
+            0x0f => self.shift_out = false,
             _ => {}
         }
     }
@@ -684,7 +858,29 @@ impl vte::Perform for Term {
             'X' => self.erase_chars(pn(params, 0, 1)),
             'S' => self.scroll_up(pn(params, 0, 1)),
             'T' => self.scroll_down(pn(params, 0, 1)),
-            'm' => self.apply_sgr(params),
+            'm' if intermediates.first() == Some(&b'>') => {
+                // XTMODKEYS: CSI > 4 ; n m sets modifyOtherKeys; CSI > 4 m resets
+                if self.caps.modify_other_keys && praw(params, 0, 0) == 4 {
+                    self.screen.modes.modify_other_keys = praw(params, 1, 0) as u8;
+                }
+            }
+            'm' if intermediates.first() == Some(&b'?') => {
+                // XTQMODKEYS: CSI ? 4 m → CSI > 4 ; n m
+                if self.caps.modify_other_keys && praw(params, 0, 0) == 4 {
+                    let n = self.screen.modes.modify_other_keys;
+                    self.replies
+                        .extend_from_slice(format!("\x1b[>4;{n}m").as_bytes());
+                }
+            }
+            'm' if intermediates.is_empty() => self.apply_sgr(params),
+            'u' if !intermediates.is_empty() => self.kitty_keyboard(params, intermediates),
+            'q' if intermediates.first() == Some(&b'>') => {
+                // XTVERSION → DCS > | text ST
+                if let Some(v) = self.caps.xtversion.clone() {
+                    self.replies
+                        .extend_from_slice(format!("\x1bP>|{v}\x1b\\").as_bytes());
+                }
+            }
             'r' => {
                 let (rows, _) = self.dims();
                 let top = pn(params, 0, 1) - 1;
@@ -736,19 +932,32 @@ impl vte::Perform for Term {
                 };
                 self.screen.cursor.visible = shape != 0 || self.screen.cursor.visible;
             }
+            'p' if dollar && private => {
+                let m = praw(params, 0, 0);
+                self.report_dec_mode(m);
+            }
             'p' if dollar => {
-                // DECRQM — report mode not recognized (0) for simplicity
+                // ANSI-mode DECRQM: none implemented → not recognized
                 let m = praw(params, 0, 0);
                 self.replies
-                    .extend_from_slice(format!("\x1b[?{};0$y", m).as_bytes());
+                    .extend_from_slice(format!("\x1b[{m};0$y").as_bytes());
             }
             _ => {}
         }
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        if !intermediates.is_empty() {
-            // charset designation etc. — ignore
+        if let Some(&slot) = intermediates.first() {
+            // SCS: ESC ( F designates G0, ESC ) F designates G1
+            let set = match byte {
+                b'0' => Charset::DecGraphics,
+                _ => Charset::Ascii,
+            };
+            match slot {
+                b'(' => self.g0 = set,
+                b')' => self.g1 = set,
+                _ => {}
+            }
             return;
         }
         match byte {
@@ -773,7 +982,9 @@ impl vte::Perform for Term {
                 // RIS full reset
                 let (rows, cols) = self.dims();
                 let (da1, da2) = (self.da1.clone(), self.da2.clone());
+                let caps = self.caps.clone();
                 *self = Term::new(rows, cols, da1, da2);
+                self.caps = caps;
             }
             _ => {}
         }
@@ -790,10 +1001,8 @@ impl vte::Perform for Term {
                     self.screen.title = Some(String::from_utf8_lossy(t).to_string());
                 }
             }
-            b"5379" => {
-                if params.get(1) == Some(&b"muse:ready".as_ref()) {
-                    self.ready_pulses += 1;
-                }
+            b"5379" if params.get(1) == Some(&b"muse:ready".as_ref()) => {
+                self.ready_pulses += 1;
             }
             _ => {}
         }

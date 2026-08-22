@@ -11,3 +11,6 @@
 *.swp
 *.swo
 *~
+
+# Runner failure artifacts (never committed)
+test-results/

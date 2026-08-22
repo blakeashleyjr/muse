@@ -3,22 +3,57 @@
 use crate::report::{AssertionResult, CaseResult, SnapshotResult};
 use crate::spec::{parse_color, Spec, Step};
 use muse_core::config::SyncConfig;
-use muse_core::input::{Mods, MouseAction, MouseButton, MouseEvent};
 use muse_core::locator::StylePredicate;
 use muse_core::snapshot::Snapshot;
 use muse_core::style::Attrs;
 use muse_diff::{BaselineOutcome, Baselines, DiffOptions};
 use muse_engine::assert;
 use muse_engine::{resolve_profile, spawn_terminal, TerminalHandle};
+use muse_trace::TraceMeta;
 use regex::Regex;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
+/// When to keep a per-case trace directory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TraceMode {
+    /// Never record.
+    Off,
+    /// Record every case; keep the artifacts only for failing ones.
+    #[default]
+    RetainOnFailure,
+    /// Record and keep for every case.
+    On,
+}
+
+impl TraceMode {
+    pub fn parse(s: &str) -> Option<TraceMode> {
+        match s {
+            "off" => Some(TraceMode::Off),
+            "retain-on-failure" => Some(TraceMode::RetainOnFailure),
+            "on" => Some(TraceMode::On),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct RunOpts {
     pub sync: SyncConfig,
     pub assert_deadline_ms: u64,
     pub snapshots_dir: String,
     pub update_snapshots: bool,
+    /// Refuse to create missing baselines (`--ci`): a snapshot with no
+    /// baseline is a failure, not a silent pass.
+    pub forbid_create: bool,
+    /// Where per-case failure artifacts go (`test-results` by default);
+    /// `None` disables artifacts entirely.
+    pub artifacts_dir: Option<PathBuf>,
+    pub trace: TraceMode,
+    /// Normalize rules applied to every snapshot (from `[[normalize]]` in
+    /// muse.toml), after the spec's own rules.
+    pub default_normalize: Vec<muse_diff::normalize::NormalizeRule>,
 }
 
 impl Default for RunOpts {
@@ -28,8 +63,75 @@ impl Default for RunOpts {
             assert_deadline_ms: 5000,
             snapshots_dir: "snapshots".into(),
             update_snapshots: false,
+            forbid_create: false,
+            artifacts_dir: Some(PathBuf::from("test-results")),
+            trace: TraceMode::RetainOnFailure,
+            default_normalize: Vec::new(),
         }
     }
+}
+
+/// `name__profile__WxH` with anything path-hostile replaced.
+pub fn case_slug(name: &str, profile: &str, cols: u16, rows: u16) -> String {
+    let raw = format!("{name}__{profile}__{cols}x{rows}");
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Write the final screen (text + png + cursor/title/modes) and the result
+/// record into `dir`. Best-effort: a failure to write an artifact must never
+/// change the verdict, so errors are folded into `result.error` only when the
+/// case had no error yet.
+async fn write_final_artifacts(handle: &TerminalHandle, dir: &Path, result: &CaseResult) {
+    if let Ok(Snapshot::Text(t)) = handle
+        .snapshot(muse_core::snapshot::SnapshotKind::Text, 1, 500)
+        .await
+    {
+        let _ = std::fs::write(dir.join("final.txt"), t);
+    }
+    if let Ok(Snapshot::Pixel(p)) = handle
+        .snapshot(
+            muse_core::snapshot::SnapshotKind::Pixel { scale: 1 },
+            1,
+            500,
+        )
+        .await
+    {
+        let _ = std::fs::write(dir.join("final.png"), p.png);
+    }
+    if let Ok((screen, generation)) = handle.screen().await {
+        let info = serde_json::json!({
+            "generation": generation,
+            "cursor": screen.cursor,
+            "title": screen.title,
+            "modes": screen.modes,
+            "alt_screen": screen.active == muse_core::screen::ScreenKind::Alt,
+            "cols": screen.active_grid().cols(),
+            "rows": screen.active_grid().rows(),
+        });
+        let _ = std::fs::write(
+            dir.join("final.json"),
+            serde_json::to_string_pretty(&info).unwrap_or_default(),
+        );
+    }
+    let _ = std::fs::write(
+        dir.join("result.json"),
+        serde_json::to_string_pretty(result).unwrap_or_default(),
+    );
 }
 
 /// Expand `{case_tmp}` in a string.
@@ -54,7 +156,10 @@ pub async fn run_case(
         snapshots: Vec::new(),
         error: None,
         flaky: false,
+        artifacts: None,
+        duration_ms: 0,
     };
+    let t0 = std::time::Instant::now();
 
     // Create a per-case temp directory if requested. It is dropped (deleted)
     // at the end of this function, after the process exits.
@@ -106,32 +211,102 @@ pub async fn run_case(
         cfg
     };
 
+    let env_for_meta: Vec<(String, String)> =
+        env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let profile_label = profile.name.clone();
     let handle = match spawn_terminal(profile, cols, rows, spec.spawn.clone(), env, None, sync_cfg)
     {
         Ok(h) => h,
         Err(e) => {
             result.error = Some(e.to_string());
+            result.duration_ms = t0.elapsed().as_millis() as u64;
             return result;
         }
     };
 
-    if let Err(e) = run_steps(spec, &handle, cols, rows, opts, &mut result, &case_tmp).await {
+    // Per-case artifact directory: wiped first so a rerun never shows stale
+    // files from a previous verdict.
+    let case_dir = opts
+        .artifacts_dir
+        .as_ref()
+        .map(|d| d.join(case_slug(&spec.name, profile_name, cols, rows)));
+    if let Some(dir) = &case_dir {
+        let _ = std::fs::remove_dir_all(dir);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            result.error = Some(format!("artifacts dir {}: {e}", dir.display()));
+            handle.shutdown().await.ok();
+            result.duration_ms = t0.elapsed().as_millis() as u64;
+            return result;
+        }
+        if opts.trace != TraceMode::Off {
+            let meta = TraceMeta {
+                version: 1,
+                profile: profile_label,
+                cols,
+                rows,
+                env: env_for_meta,
+                started_at: unix_now(),
+                sut_argv: spec.spawn.clone(),
+            };
+            let _ = handle.start_trace(dir.join("trace"), meta).await;
+        }
+    }
+
+    let ctx = CaseCtx {
+        cols,
+        rows,
+        case_tmp: case_tmp.clone(),
+        case_dir: case_dir.clone(),
+    };
+    if let Err(e) = run_steps(spec, &handle, opts, &mut result, &ctx).await {
         result.error = Some(e);
+    }
+
+    result.duration_ms = t0.elapsed().as_millis() as u64;
+    tracing::info!(
+        case = %result.case_id(),
+        passed = result.passed(),
+        ms = result.duration_ms,
+        "case finished"
+    );
+    if let Some(dir) = &case_dir {
+        let keep = !result.passed() || opts.trace == TraceMode::On;
+        if keep {
+            if opts.trace != TraceMode::Off {
+                let _ = handle.export_trace().await;
+            }
+            write_final_artifacts(&handle, dir, &result).await;
+            result.artifacts = Some(dir.to_string_lossy().into_owned());
+        } else {
+            // The actor's shutdown flushes an active trace — discard it first
+            // or the flush recreates `trace/` after this removal.
+            let _ = handle.discard_trace().await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     handle.shutdown().await.ok();
     result
 }
 
+/// Per-case facts the step loop needs.
+struct CaseCtx {
+    cols: u16,
+    rows: u16,
+    case_tmp: String,
+    case_dir: Option<PathBuf>,
+}
+
 async fn run_steps(
     spec: &Spec,
     handle: &TerminalHandle,
-    cols: u16,
-    rows: u16,
     opts: &RunOpts,
     result: &mut CaseResult,
-    case_tmp: &str,
+    ctx: &CaseCtx,
 ) -> Result<(), String> {
+    let CaseCtx { cols, rows, .. } = *ctx;
+    let case_tmp = ctx.case_tmp.as_str();
+    let case_dir = ctx.case_dir.as_deref();
     let store = Baselines::new(&opts.snapshots_dir, opts.update_snapshots);
     let dl = opts.assert_deadline_ms;
     // Per-path byte cursor for watch_log steps.
@@ -163,11 +338,7 @@ async fn run_steps(
                 let o = assert::to_be_visible(handle, l, ml, step_dl)
                     .await
                     .map_err(es)?;
-                result.assertions.push(AssertionResult {
-                    kind: "toBeVisible".into(),
-                    ok: o.ok,
-                    detail: o.detail,
-                });
+                push_assertion(handle, result, "toBeVisible", o.ok, o.detail).await;
             }
             Step::ExpectNotVisible(loc) => {
                 let step_dl = loc.timeout_ms.unwrap_or(dl);
@@ -175,11 +346,7 @@ async fn run_steps(
                 let o = assert::to_not_be_visible(handle, l, ml, step_dl)
                     .await
                     .map_err(es)?;
-                result.assertions.push(AssertionResult {
-                    kind: "toNotBeVisible".into(),
-                    ok: o.ok,
-                    detail: o.detail,
-                });
+                push_assertion(handle, result, "toNotBeVisible", o.ok, o.detail).await;
             }
             Step::ExpectText(et) => {
                 let step_dl = et.loc.timeout_ms.unwrap_or(dl);
@@ -187,11 +354,14 @@ async fn run_steps(
                 let o = assert::to_have_text(handle, l, &et.equals, ml, step_dl)
                     .await
                     .map_err(es)?;
-                result.assertions.push(AssertionResult {
-                    kind: "toHaveText".into(),
-                    ok: o.ok,
-                    detail: format!("expected={:?} actual={:?}", o.expected, o.actual),
-                });
+                push_assertion(
+                    handle,
+                    result,
+                    "toHaveText",
+                    o.ok,
+                    format!("expected={:?} actual={:?}", o.expected, o.actual),
+                )
+                .await;
             }
             Step::ExpectContains(ec) => {
                 let step_dl = ec.loc.timeout_ms.unwrap_or(dl);
@@ -199,11 +369,14 @@ async fn run_steps(
                 let o = assert::to_contain_text(handle, l, &ec.contains, ml, step_dl)
                     .await
                     .map_err(es)?;
-                result.assertions.push(AssertionResult {
-                    kind: "toContainText".into(),
-                    ok: o.ok,
-                    detail: format!("expected={:?} actual={:?}", o.expected, o.actual),
-                });
+                push_assertion(
+                    handle,
+                    result,
+                    "toContainText",
+                    o.ok,
+                    format!("expected={:?} actual={:?}", o.expected, o.actual),
+                )
+                .await;
             }
             Step::ExpectCount(ec) => {
                 let step_dl = ec.loc.timeout_ms.unwrap_or(dl);
@@ -211,11 +384,7 @@ async fn run_steps(
                 let o = assert::to_have_count(handle, l, ec.eq, ec.min, ec.max, ml, step_dl)
                     .await
                     .map_err(es)?;
-                result.assertions.push(AssertionResult {
-                    kind: "toHaveCount".into(),
-                    ok: o.ok,
-                    detail: o.detail,
-                });
+                push_assertion(handle, result, "toHaveCount", o.ok, o.detail).await;
             }
             Step::Snapshot(snap) => {
                 let defaults = spec.snapshot_defaults.as_ref();
@@ -228,6 +397,7 @@ async fn run_steps(
                 if let Some(d) = defaults {
                     normalize.extend(d.normalize_rules());
                 }
+                normalize.extend(opts.default_normalize.iter().cloned());
                 let s = handle.snapshot(kind, 1, dl).await.map_err(es)?;
                 let diff_opts = DiffOptions {
                     masks,
@@ -236,6 +406,19 @@ async fn run_steps(
                     ..Default::default()
                 };
                 let test_key = format!("{}__{}", spec.name, snap.name);
+                if opts.forbid_create
+                    && !baseline_path(&store, &test_key, &result.profile, cols, rows, &s).exists()
+                {
+                    result.snapshots.push(SnapshotResult {
+                        name: snap.name.clone(),
+                        outcome: "missing baseline (creation forbidden by --ci)".into(),
+                        passed: false,
+                    });
+                    if let Some(dir) = case_dir {
+                        write_actual(dir, &snap.name, &s);
+                    }
+                    continue;
+                }
                 let outcome = check_snapshot(
                     &store,
                     &test_key,
@@ -246,6 +429,18 @@ async fn run_steps(
                     &diff_opts,
                 )
                 .map_err(|e| e.to_string())?;
+                if let (Some(dir), BaselineOutcome::Mismatch(report)) = (case_dir, &outcome) {
+                    write_actual(dir, &snap.name, &s);
+                    if let Some(u) = &report.unified {
+                        let _ = std::fs::write(dir.join(format!("{}.diff.txt", snap.name)), u);
+                    }
+                    if let Some(png) = &report.diff_png {
+                        let _ = std::fs::write(dir.join(format!("{}.diff.png", snap.name)), png);
+                    }
+                    let bp = baseline_path(&store, &test_key, &result.profile, cols, rows, &s);
+                    let ext = bp.extension().and_then(|e| e.to_str()).unwrap_or("txt");
+                    let _ = std::fs::copy(&bp, dir.join(format!("{}.baseline.{ext}", snap.name)));
+                }
                 result.snapshots.push(snapshot_result(&snap.name, outcome));
             }
             Step::CheckFile(cf) => {
@@ -255,11 +450,14 @@ async fn run_steps(
                 let ok = match std::fs::read_to_string(&path) {
                     Err(_) if cf.skip_if_missing => true,
                     Err(e) => {
-                        result.assertions.push(AssertionResult {
-                            kind: "checkFile".into(),
-                            ok: false,
-                            detail: format!("cannot read {path}: {e}"),
-                        });
+                        push_assertion(
+                            handle,
+                            result,
+                            "checkFile",
+                            false,
+                            format!("cannot read {path}: {e}"),
+                        )
+                        .await;
                         continue;
                     }
                     Ok(content) => {
@@ -268,14 +466,14 @@ async fn run_steps(
                         if violations.is_empty() {
                             true
                         } else {
-                            result.assertions.push(AssertionResult {
-                                kind: "checkFile".into(),
-                                ok: false,
-                                detail: format!(
-                                    "log violations in {path}:\n{}",
-                                    violations.join("\n")
-                                ),
-                            });
+                            push_assertion(
+                                handle,
+                                result,
+                                "checkFile",
+                                false,
+                                format!("log violations in {path}:\n{}", violations.join("\n")),
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -338,41 +536,10 @@ async fn run_steps(
                 let o = assert::to_have_style(handle, l, pred, ml, step_dl)
                     .await
                     .map_err(es)?;
-                result.assertions.push(AssertionResult {
-                    kind: "toHaveStyle".into(),
-                    ok: o.ok,
-                    detail: o.detail,
-                });
+                push_assertion(handle, result, "toHaveStyle", o.ok, o.detail).await;
             }
             Step::Mouse(ms) => {
-                let button = match ms.button.to_lowercase().as_str() {
-                    "right" => MouseButton::Right,
-                    "middle" => MouseButton::Middle,
-                    "wheel_up" | "wheelup" => MouseButton::WheelUp,
-                    "wheel_down" | "wheeldown" => MouseButton::WheelDown,
-                    _ => MouseButton::Left,
-                };
-                let action = match ms.action.to_lowercase().as_str() {
-                    "release" => MouseAction::Release,
-                    "move" => MouseAction::Move,
-                    _ => MouseAction::Press,
-                };
-                let mut mods = Mods::empty();
-                for m in &ms.mods {
-                    match m.to_lowercase().as_str() {
-                        "ctrl" | "control" => mods |= Mods::CTRL,
-                        "alt" | "meta" => mods |= Mods::ALT,
-                        "shift" => mods |= Mods::SHIFT,
-                        _ => {}
-                    }
-                }
-                let ev = MouseEvent {
-                    button,
-                    action,
-                    row: ms.row,
-                    col: ms.col,
-                    mods,
-                };
+                let ev = ms.to_event().map_err(es)?;
                 handle.mouse(ev).await.map_err(es)?;
             }
             Step::BeginStep(name) => {
@@ -386,35 +553,45 @@ async fn run_steps(
                 let ok = match std::fs::File::open(&path) {
                     Err(_) if wl.skip_if_missing => true,
                     Err(e) => {
-                        result.assertions.push(AssertionResult {
-                            kind: "watchLog".into(),
-                            ok: false,
-                            detail: format!("cannot open {path}: {e}"),
-                        });
+                        push_assertion(
+                            handle,
+                            result,
+                            "watchLog",
+                            false,
+                            format!("cannot open {path}: {e}"),
+                        )
+                        .await;
                         continue;
                     }
                     Ok(mut f) => {
                         // Seek to the cursor position, read only new content.
+                        // Read bytes (a non-UTF-8 log must fail loudly, not read
+                        // as empty), and only consume up to the last complete
+                        // line so a line split across two steps is never
+                        // matched in halves.
                         let cursor = log_cursors.get(&path).copied().unwrap_or(0);
-                        let _ = f.seek(SeekFrom::Start(cursor));
-                        let mut new_content = String::new();
-                        let _ = f.read_to_string(&mut new_content);
-                        // Advance cursor by bytes consumed.
-                        let new_cursor = cursor + new_content.len() as u64;
-                        log_cursors.insert(path.clone(), new_cursor);
+                        f.seek(SeekFrom::Start(cursor))
+                            .map_err(|e| format!("watch_log: seek {path}: {e}"))?;
+                        let mut raw = Vec::new();
+                        f.read_to_end(&mut raw)
+                            .map_err(|e| format!("watch_log: read {path}: {e}"))?;
+                        let consumed = raw.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+                        let new_content = String::from_utf8(raw[..consumed].to_vec())
+                            .map_err(|e| format!("watch_log: {path} is not UTF-8: {e}"))?;
+                        log_cursors.insert(path.clone(), cursor + consumed as u64);
                         let violations: Vec<&str> =
                             new_content.lines().filter(|l| re.is_match(l)).collect();
                         if violations.is_empty() {
                             true
                         } else {
-                            result.assertions.push(AssertionResult {
-                                kind: "watchLog".into(),
-                                ok: false,
-                                detail: format!(
-                                    "new log violations in {path}:\n{}",
-                                    violations.join("\n")
-                                ),
-                            });
+                            push_assertion(
+                                handle,
+                                result,
+                                "watchLog",
+                                false,
+                                format!("new log violations in {path}:\n{}", violations.join("\n")),
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -453,6 +630,39 @@ fn check_snapshot(
     }
 }
 
+/// Where the baseline for this snapshot lives (text and styled share `.txt`).
+fn baseline_path(
+    store: &Baselines,
+    test_key: &str,
+    profile: &str,
+    cols: u16,
+    rows: u16,
+    snap: &Snapshot,
+) -> PathBuf {
+    match snap {
+        Snapshot::Text(_) => store.path(test_key, profile, cols, rows, "txt"),
+        Snapshot::Styled(_) => {
+            store.path(&format!("{test_key}#styled"), profile, cols, rows, "txt")
+        }
+        Snapshot::Pixel(_) => store.path(test_key, profile, cols, rows, "png"),
+    }
+}
+
+/// Write the snapshot as taken into the case artifact dir.
+fn write_actual(dir: &Path, name: &str, snap: &Snapshot) {
+    match snap {
+        Snapshot::Text(t) => {
+            let _ = std::fs::write(dir.join(format!("{name}.actual.txt")), t);
+        }
+        Snapshot::Styled(s) => {
+            let _ = std::fs::write(dir.join(format!("{name}.actual.txt")), s.to_canonical());
+        }
+        Snapshot::Pixel(p) => {
+            let _ = std::fs::write(dir.join(format!("{name}.actual.png")), &p.png);
+        }
+    }
+}
+
 fn snapshot_result(name: &str, outcome: BaselineOutcome) -> SnapshotResult {
     let (passed, text) = match &outcome {
         BaselineOutcome::Created => (true, "created".to_string()),
@@ -467,6 +677,22 @@ fn snapshot_result(name: &str, outcome: BaselineOutcome) -> SnapshotResult {
     }
 }
 
+/// Record an assertion on the case result and mirror it into the trace.
+async fn push_assertion(
+    handle: &TerminalHandle,
+    result: &mut CaseResult,
+    kind: impl Into<String>,
+    ok: bool,
+    detail: impl Into<String>,
+) {
+    let kind = kind.into();
+    let detail = detail.into();
+    let _ = handle
+        .record_assertion(kind.clone(), ok, detail.clone())
+        .await;
+    result.assertions.push(AssertionResult { kind, ok, detail });
+}
+
 fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -479,8 +705,121 @@ mod tests {
         RunOpts {
             assert_deadline_ms: 2000,
             snapshots_dir: dir.to_string_lossy().to_string(),
+            artifacts_dir: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn slug_is_path_safe() {
+        assert_eq!(case_slug("a b/c", "xterm", 80, 24), "a_b_c__xterm__80x24");
+        assert_eq!(TraceMode::parse("on"), Some(TraceMode::On));
+        assert_eq!(TraceMode::parse("nope"), None);
+    }
+
+    #[tokio::test]
+    async fn failing_case_writes_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let art = dir.path().join("results");
+        let spec = Spec::from_yaml(
+            "name: art\nspawn: [\"sh\", \"-c\", \"echo visible; exec cat\"]\nsteps:\n  - expect_visible: {text: \"visible\"}\n  - expect_visible: {text: \"absent\", timeout_ms: 200}\n",
+        )
+        .unwrap();
+        let o = RunOpts {
+            artifacts_dir: Some(art.clone()),
+            ..opts(dir.path())
+        };
+        let r = run_case(&spec, "xterm", 40, 10, &o).await;
+        assert!(!r.passed());
+        let case = art.join("art__xterm__40x10");
+        assert_eq!(r.artifacts.as_deref(), Some(case.to_str().unwrap()));
+        for f in ["final.txt", "final.png", "final.json", "result.json"] {
+            assert!(case.join(f).exists(), "missing {f}");
+        }
+        assert!(std::fs::read_to_string(case.join("final.txt"))
+            .unwrap()
+            .contains("visible"));
+        assert!(case.join("trace/meta.json").exists());
+        assert!(case.join("trace/output.cast").exists());
+        assert!(r.duration_ms > 0);
+    }
+
+    #[tokio::test]
+    async fn passing_case_cleans_artifacts_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let art = dir.path().join("results");
+        let spec = Spec::from_yaml(
+            "name: clean\nspawn: [\"echo\", \"hi\"]\nsteps:\n  - expect_visible: {text: \"hi\"}\n",
+        )
+        .unwrap();
+        let o = RunOpts {
+            artifacts_dir: Some(art.clone()),
+            ..opts(dir.path())
+        };
+        let r = run_case(&spec, "xterm", 40, 10, &o).await;
+        assert!(r.passed());
+        assert!(r.artifacts.is_none());
+        // give the actor's shutdown a moment: nothing may reappear
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!art.join("clean__xterm__40x10").exists());
+        // trace=on keeps it
+        let o = RunOpts {
+            trace: TraceMode::On,
+            ..o
+        };
+        let r = run_case(&spec, "xterm", 40, 10, &o).await;
+        assert!(r.passed());
+        assert!(art.join("clean__xterm__40x10/trace/meta.json").exists());
+    }
+
+    #[tokio::test]
+    async fn snapshot_mismatch_writes_diff_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let art = dir.path().join("results");
+        let snaps = dir.path().join("snaps");
+        let mk = |word: &str| {
+            Spec::from_yaml(&format!(
+                "name: mm\nspawn: [\"echo\", \"{word}\"]\nsteps:\n  - expect_visible: {{text: \"{word}\"}}\n  - snapshot: {{name: s, kind: text}}\n  - snapshot: {{name: p, kind: pixel}}\n"
+            ))
+            .unwrap()
+        };
+        let o = RunOpts {
+            artifacts_dir: Some(art.clone()),
+            snapshots_dir: snaps.to_string_lossy().to_string(),
+            ..opts(dir.path())
+        };
+        assert!(run_case(&mk("one"), "xterm", 40, 10, &o).await.passed());
+        let r = run_case(&mk("two"), "xterm", 40, 10, &o).await;
+        assert!(!r.passed());
+        let case = art.join("mm__xterm__40x10");
+        for f in [
+            "s.actual.txt",
+            "s.diff.txt",
+            "s.baseline.txt",
+            "p.actual.png",
+            "p.diff.png",
+            "p.baseline.png",
+        ] {
+            assert!(case.join(f).exists(), "missing {f}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_mode_refuses_to_create_baselines() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = Spec::from_yaml(
+            "name: ci\nspawn: [\"echo\", \"hi\"]\nsteps:\n  - snapshot: {name: s, kind: text}\n",
+        )
+        .unwrap();
+        let o = RunOpts {
+            forbid_create: true,
+            ..opts(dir.path())
+        };
+        let r = run_case(&spec, "xterm", 40, 10, &o).await;
+        assert!(!r.passed());
+        assert!(r.snapshots[0].outcome.contains("missing baseline"));
+        // and nothing was written
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
     #[tokio::test]
@@ -749,5 +1088,68 @@ steps:
         .unwrap();
         let r = run_case(&spec, "xterm", 40, 10, &opts(dir.path())).await;
         assert!(r.passed(), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn assertions_are_recorded_in_the_trace() {
+        let dir = tempfile::tempdir().unwrap();
+        let art = dir.path().join("results");
+        let spec = Spec::from_yaml(
+            "name: tr\nspawn: [\"echo\", \"hi\"]\nsteps:\n  - begin_step: \"look\"\n  - expect_visible: {text: \"hi\"}\n  - expect_visible: {text: \"nope\", timeout_ms: 100}\n",
+        )
+        .unwrap();
+        let o = RunOpts {
+            artifacts_dir: Some(art.clone()),
+            ..opts(dir.path())
+        };
+        let r = run_case(&spec, "xterm", 40, 10, &o).await;
+        assert!(!r.passed());
+        let steps =
+            std::fs::read_to_string(art.join("tr__xterm__40x10/trace/steps.jsonl")).unwrap();
+        assert!(steps.contains("\"look\""), "{steps}");
+        assert!(steps.contains("toBeVisible"), "{steps}");
+        assert!(steps.contains("\"ok\":false"), "{steps}");
+    }
+
+    #[tokio::test]
+    async fn watch_log_does_not_split_lines_and_rejects_non_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("app.log");
+        std::fs::write(&log, "fine\nERR").unwrap(); // partial last line
+        let spec_text = format!(
+            "name: wl\nspawn: [\"cat\"]\nsteps:\n  - watch_log: {{path: \"{0}\", reject_re: \"ERROR\"}}\n  - sleep_ms: 50\n  - watch_log: {{path: \"{0}\", reject_re: \"ERROR\"}}\n",
+            log.display()
+        );
+        let spec = Spec::from_yaml(&spec_text).unwrap();
+        // Complete the line between the two watches: the violation spans the
+        // point where the first watch stopped reading.
+        let log2 = log.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log2)
+                .unwrap();
+            f.write_all(b"OR happened\n").unwrap();
+        });
+        let r = run_case(&spec, "xterm", 40, 10, &opts(dir.path())).await;
+        assert!(!r.passed(), "{r:?}");
+        assert!(r
+            .assertions
+            .iter()
+            .any(|a| !a.ok && a.detail.contains("ERROR happened")));
+
+        std::fs::write(&log, b"\xff\xfe bad\n").unwrap();
+        let spec = Spec::from_yaml(&format!(
+            "name: wl2\nspawn: [\"cat\"]\nsteps:\n  - watch_log: {{path: \"{}\", reject_re: \"x\"}}\n",
+            log.display()
+        ))
+        .unwrap();
+        let r = run_case(&spec, "xterm", 40, 10, &opts(dir.path())).await;
+        assert!(
+            r.error.as_deref().unwrap_or("").contains("not UTF-8"),
+            "{r:?}"
+        );
     }
 }

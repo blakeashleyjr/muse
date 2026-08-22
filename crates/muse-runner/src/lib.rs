@@ -48,8 +48,15 @@ pub struct SuiteOpts {
     pub only_profiles: Option<Vec<String>>,
     /// Substring filter on test name (`--grep`).
     pub grep: Option<String>,
-    /// `--shard i/n`: run only cases where index % n == i.
+    /// `--shard i/n`: run only cases where index % n == i (0-indexed).
     pub shard: Option<(usize, usize)>,
+    /// Let a run that selected zero cases pass. Off by default: a filter or
+    /// shard that matches nothing is almost always a mistake, and "0 passed,
+    /// 0 failed" must not read as green.
+    pub allow_empty: bool,
+    /// Hard wall-clock cap per case attempt; `0` disables. A hung SUT plus a
+    /// generous deadline must not wedge a worker forever.
+    pub case_timeout_ms: u64,
 }
 
 /// Run a set of specs, expanding the matrix and scheduling across workers.
@@ -68,14 +75,29 @@ pub async fn run_suite(specs: &[Spec], opts: &SuiteOpts) -> SuiteResult {
     }
     // Sharding.
     if let Some((i, n)) = opts.shard {
-        if n > 0 {
-            work = work
-                .into_iter()
-                .enumerate()
-                .filter(|(idx, _)| idx % n == i)
-                .map(|(_, w)| w)
-                .collect();
+        if n == 0 || i >= n {
+            return SuiteResult {
+                cases: Vec::new(),
+                error: Some(format!(
+                    "bad shard {i}/{n}: expected 0 <= i < n (shards are 0-indexed)"
+                )),
+            };
         }
+        work = work
+            .into_iter()
+            .enumerate()
+            .filter(|(idx, _)| idx % n == i)
+            .map(|(_, w)| w)
+            .collect();
+    }
+    if work.is_empty() && !opts.allow_empty {
+        return SuiteResult {
+            cases: Vec::new(),
+            error: Some(
+                "no cases selected (check --grep / --shard / --profile; pass --allow-empty to accept)"
+                    .into(),
+            ),
+        };
     }
 
     let workers = if opts.workers == 0 {
@@ -92,17 +114,35 @@ pub async fn run_suite(specs: &[Spec], opts: &SuiteOpts) -> SuiteResult {
         let spec = specs[si].clone();
         let sem = sem.clone();
         let retries = opts.retries;
-        let run_opts = clone_run_opts(&opts.run);
-        tasks.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.unwrap();
-            run_with_retries(&spec, &case, &run_opts, retries).await
-        }));
+        let run_opts = opts.run.clone();
+        let timeout_ms = opts.case_timeout_ms;
+        let label = (spec.name.clone(), case.clone());
+        tasks.push((
+            label,
+            tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await.unwrap();
+                run_with_retries(&spec, &case, &run_opts, retries, timeout_ms).await
+            }),
+        ));
     }
 
     let mut result = SuiteResult::default();
-    for t in tasks {
-        if let Ok(c) = t.await {
-            result.cases.push(c);
+    for ((name, case), t) in tasks {
+        match t.await {
+            Ok(c) => result.cases.push(c),
+            // A panic inside run_case is a failed case, never a vanished one.
+            Err(e) => result.cases.push(CaseResult {
+                name,
+                profile: case.profile,
+                cols: case.cols,
+                rows: case.rows,
+                assertions: Vec::new(),
+                snapshots: Vec::new(),
+                error: Some(format!("runner panicked: {e}")),
+                flaky: false,
+                artifacts: None,
+                duration_ms: 0,
+            }),
         }
     }
     // stable order for deterministic reporting
@@ -110,20 +150,45 @@ pub async fn run_suite(specs: &[Spec], opts: &SuiteOpts) -> SuiteResult {
     result
 }
 
+/// One attempt, capped at `timeout_ms` (0 = uncapped). Dropping the
+/// `run_case` future drops its terminal handle, which stops the SUT.
+async fn run_once(spec: &Spec, case: &MatrixCase, opts: &RunOpts, timeout_ms: u64) -> CaseResult {
+    let fut = run::run_case(spec, &case.profile, case.cols, case.rows, opts);
+    if timeout_ms == 0 {
+        return fut.await;
+    }
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+        Ok(r) => r,
+        Err(_) => CaseResult {
+            name: spec.name.clone(),
+            profile: case.profile.clone(),
+            cols: case.cols,
+            rows: case.rows,
+            assertions: Vec::new(),
+            snapshots: Vec::new(),
+            error: Some(format!("case timed out after {timeout_ms}ms")),
+            flaky: false,
+            artifacts: None,
+            duration_ms: timeout_ms,
+        },
+    }
+}
+
 async fn run_with_retries(
     spec: &Spec,
     case: &MatrixCase,
     opts: &RunOpts,
     retries: u32,
+    timeout_ms: u64,
 ) -> CaseResult {
-    let mut last = run::run_case(spec, &case.profile, case.cols, case.rows, opts).await;
+    let mut last = run_once(spec, case, opts, timeout_ms).await;
     if last.passed() {
         return last;
     }
     let mut attempts = 0;
     while attempts < retries {
         attempts += 1;
-        let again = run::run_case(spec, &case.profile, case.cols, case.rows, opts).await;
+        let again = run_once(spec, case, opts, timeout_ms).await;
         if again.passed() {
             // failed then passed → flaky (reported, not a clean pass)
             let mut flaky = again;
@@ -133,15 +198,6 @@ async fn run_with_retries(
         last = again;
     }
     last
-}
-
-fn clone_run_opts(o: &RunOpts) -> RunOpts {
-    RunOpts {
-        sync: o.sync.clone(),
-        assert_deadline_ms: o.assert_deadline_ms,
-        snapshots_dir: o.snapshots_dir.clone(),
-        update_snapshots: o.update_snapshots,
-    }
 }
 
 #[cfg(test)]
@@ -189,6 +245,7 @@ mod tests {
             run: RunOpts {
                 assert_deadline_ms: 2000,
                 snapshots_dir: dir.path().to_string_lossy().to_string(),
+                artifacts_dir: None,
                 ..Default::default()
             },
             ..Default::default()
@@ -209,6 +266,7 @@ mod tests {
             run: RunOpts {
                 assert_deadline_ms: 2000,
                 snapshots_dir: dir.path().to_string_lossy().to_string(),
+                artifacts_dir: None,
                 ..Default::default()
             },
             grep: Some("alph".into()),
@@ -227,6 +285,7 @@ mod tests {
             run: RunOpts {
                 assert_deadline_ms: 2000,
                 snapshots_dir: dir.path().to_string_lossy().to_string(),
+                artifacts_dir: None,
                 ..Default::default()
             },
             shard: Some((i, 2)),
@@ -248,6 +307,7 @@ mod tests {
             run: RunOpts {
                 assert_deadline_ms: 200,
                 snapshots_dir: dir.path().to_string_lossy().to_string(),
+                artifacts_dir: None,
                 ..Default::default()
             },
             retries: 2,
@@ -269,6 +329,7 @@ mod tests {
             run: RunOpts {
                 assert_deadline_ms: 2000,
                 snapshots_dir: dir.path().to_string_lossy().to_string(),
+                artifacts_dir: None,
                 ..Default::default()
             },
             retries: 2,
@@ -277,5 +338,59 @@ mod tests {
         let r = run_suite(&[s], &opts).await;
         assert!(r.passed());
         assert!(!r.cases[0].flaky);
+    }
+
+    #[tokio::test]
+    async fn empty_selection_is_a_failure_unless_allowed() {
+        let s = spec("alpha", &["xterm"], &["40x10"]);
+        let opts = SuiteOpts {
+            grep: Some("zzz".into()),
+            ..Default::default()
+        };
+        let r = run_suite(std::slice::from_ref(&s), &opts).await;
+        assert!(!r.passed());
+        assert!(r.error.as_deref().unwrap().contains("no cases selected"));
+        assert!(r.pretty().contains("no cases selected"));
+        let opts = SuiteOpts {
+            grep: Some("zzz".into()),
+            allow_empty: true,
+            ..Default::default()
+        };
+        assert!(run_suite(&[s], &opts).await.passed());
+    }
+
+    #[tokio::test]
+    async fn bad_shard_is_rejected() {
+        let s = spec("alpha", &["xterm"], &["40x10"]);
+        for shard in [(1, 1), (0, 0), (3, 2)] {
+            let opts = SuiteOpts {
+                shard: Some(shard),
+                ..Default::default()
+            };
+            let r = run_suite(std::slice::from_ref(&s), &opts).await;
+            assert!(!r.passed(), "{shard:?}");
+            assert!(r.error.as_deref().unwrap().contains("bad shard"));
+        }
+    }
+
+    #[tokio::test]
+    async fn case_timeout_fails_the_case() {
+        let s = Spec::from_yaml(
+            "name: hang\nmatrix:\n  profiles: [xterm]\n  sizes: [\"40x10\"]\nspawn: [\"sleep\", \"30\"]\nsteps:\n  - expect_visible: {text: \"never\", timeout_ms: 20000}\n",
+        )
+        .unwrap();
+        let opts = SuiteOpts {
+            run: RunOpts {
+                artifacts_dir: None,
+                ..Default::default()
+            },
+            case_timeout_ms: 300,
+            ..Default::default()
+        };
+        let t0 = std::time::Instant::now();
+        let r = run_suite(&[s], &opts).await;
+        assert!(!r.passed());
+        assert!(r.cases[0].error.as_deref().unwrap().contains("timed out"));
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
     }
 }

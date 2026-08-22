@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Interactive sessions** — `muse serve` daemon + `muse session
+  open|send|resize|snap|screen|wait|logs|trace|list|close|export-spec`,
+  and `muse mcp` (the same verbs as MCP tools on stdio). A program stays
+  alive between commands; `export-spec` turns a driven session into a
+  runnable spec. `skills/tui-driver/SKILL.md` documents the loop.
+- **Failure artifacts** — `muse run` keeps `test-results/<case>/` (final
+  screen as text/PNG/JSON, per-snapshot actual/diff/baseline, a trace
+  directory, `result.json`) for failing cases; `--artifacts`, `--trace`.
+  Assertions are recorded into the trace.
+- `--ci` (missing baseline = failure), `--allow-empty`, `--case-timeout-ms`;
+  `muse.toml` / `MUSE_*` / `--config` are honoured; `MUSE_LOG`.
+- Spec steps `write_line`, `mouse`, `begin_step`, `expect_not_visible`,
+  `expect_count`, `expect_style`, `expect_exit`, `check_file`, `watch_log`;
+  spec-level `env`, `case_tmp_env`, `sync`, `snapshot_defaults`.
+- Emulator: kitty keyboard protocol negotiation (+ CSI-u encoding), xterm
+  modifyOtherKeys, truthful DECRQM, DEC Special Graphics charset,
+  XTVERSION; profiles gate mode negotiation.
+
+### Fixed
+
+- Output the program writes with no input in between now produces a
+  stable frame, so retrying assertions see it (previously they resolved
+  against the last post-input frame until the deadline).
+- A slow-starting program is no longer snapshotted as an empty screen.
+- Shutdown signals the program's whole process group and reaps it.
+- A run that selects zero cases, an out-of-range `--shard`, a panicking
+  case, and an empty conformance corpus are failures, not silent passes.
+- `watch_log` no longer swallows non-UTF-8 or splits lines across steps;
+  `mouse` rejects unknown buttons/actions; JUnit output strips control
+  characters and carries `time=`.
+
 ## [0.1.0] - 2026-06-06
 
 Initial release.

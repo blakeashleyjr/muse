@@ -78,8 +78,71 @@ fn csi_with_mods(final_byte: u8, mods: Mods) -> Vec<u8> {
     format!("\x1b[1;{}{}", p, final_byte as char).into_bytes()
 }
 
+/// Modifiers other than a bare Shift — the ones that make a printable key
+/// ambiguous in the legacy encoding.
+fn ambiguous_mods(mods: Mods) -> bool {
+    !(mods & !Mods::SHIFT).is_empty()
+}
+
+/// The codepoint a key reports in CSI-u / modifyOtherKeys forms.
+fn key_codepoint(key: Key) -> Option<u32> {
+    Some(match key {
+        // kitty reports the base (unshifted, lowercase) key
+        Key::Char(c) => c.to_lowercase().next().unwrap_or(c) as u32,
+        Key::Enter => 13,
+        Key::Tab => 9,
+        Key::Backspace => 127,
+        Key::Escape => 27,
+        _ => return None,
+    })
+}
+
+/// Kitty keyboard protocol with the "disambiguate escape codes" flag: Esc and
+/// modified printable/control keys become `CSI code ; mod u`; everything
+/// else keeps its legacy form (which is unambiguous already).
+fn encode_kitty(ev: &KeyEvent) -> Option<Vec<u8>> {
+    let cp = key_codepoint(ev.key)?;
+    let needs_csi_u = match ev.key {
+        Key::Escape => true,
+        Key::Char(_) => ambiguous_mods(ev.mods),
+        Key::Enter | Key::Tab | Key::Backspace => !ev.mods.is_empty(),
+        _ => false,
+    };
+    if !needs_csi_u {
+        return None;
+    }
+    Some(if ev.mods.is_empty() {
+        format!("\x1b[{cp}u").into_bytes()
+    } else {
+        format!("\x1b[{cp};{}u", xterm_mod_param(ev.mods)).into_bytes()
+    })
+}
+
+/// xterm `modifyOtherKeys=2`: every modified key is `CSI 27 ; mod ; code ~`.
+fn encode_modify_other_keys(ev: &KeyEvent) -> Option<Vec<u8>> {
+    if !ambiguous_mods(ev.mods) {
+        return None;
+    }
+    let cp = match ev.key {
+        Key::Char(c) => c as u32,
+        Key::Enter | Key::Tab | Key::Backspace | Key::Escape => key_codepoint(ev.key)?,
+        _ => return None,
+    };
+    Some(format!("\x1b[27;{};{cp}~", xterm_mod_param(ev.mods)).into_bytes())
+}
+
 /// Encode a key event to bytes, honoring negotiated modes & capabilities.
 pub fn encode_key(ev: &KeyEvent, modes: &ModeState, caps: &Capabilities) -> Vec<u8> {
+    if kitty_active(caps, modes) && modes.kitty_kbd_flags & 1 != 0 {
+        if let Some(bytes) = encode_kitty(ev) {
+            return bytes;
+        }
+    }
+    if caps.keyboard != KeyboardProtocol::Legacy && modes.modify_other_keys == 2 {
+        if let Some(bytes) = encode_modify_other_keys(ev) {
+            return bytes;
+        }
+    }
     let has_mods = !ev.mods.is_empty();
     let only_ctrl = ev.mods == Mods::CTRL;
     let only_alt = ev.mods == Mods::ALT;
@@ -650,5 +713,101 @@ mod tests {
     #[test]
     fn mods_param_super() {
         assert_eq!(xterm_mod_param(Mods::SUPER), 9);
+    }
+
+    #[test]
+    fn kitty_disambiguate_uses_csi_u() {
+        let caps = Capabilities {
+            keyboard: KeyboardProtocol::Kitty,
+            ..Capabilities::default()
+        };
+        let mut modes = ModeState::default();
+        // flags 0: legacy
+        assert_eq!(
+            encode_key(&KeyEvent::new(Key::Escape), &modes, &caps),
+            b"\x1b"
+        );
+        modes.kitty_kbd_flags = 1;
+        assert_eq!(
+            encode_key(&KeyEvent::new(Key::Escape), &modes, &caps),
+            b"\x1b[27u"
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Char('c'), Mods::CTRL), &modes, &caps),
+            b"\x1b[99;5u"
+        );
+        assert_eq!(
+            encode_key(
+                &KeyEvent::with(Key::Char('C'), Mods::CTRL | Mods::SHIFT),
+                &modes,
+                &caps
+            ),
+            b"\x1b[99;6u"
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Tab, Mods::CTRL), &modes, &caps),
+            b"\x1b[9;5u"
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Enter, Mods::ALT), &modes, &caps),
+            b"\x1b[13;3u"
+        );
+        // unmodified printable / Enter and arrows keep legacy forms
+        assert_eq!(
+            encode_key(&KeyEvent::new(Key::Char('x')), &modes, &caps),
+            b"x"
+        );
+        assert_eq!(encode_key(&KeyEvent::new(Key::Enter), &modes, &caps), b"\r");
+        assert_eq!(
+            encode_key(&KeyEvent::new(Key::Up), &modes, &caps),
+            b"\x1b[A"
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Up, Mods::CTRL), &modes, &caps),
+            b"\x1b[1;5A"
+        );
+        // a non-kitty profile ignores the flags entirely
+        let xterm = Capabilities::default();
+        assert_eq!(
+            encode_key(&KeyEvent::new(Key::Escape), &modes, &xterm),
+            b"\x1b"
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_level_two() {
+        let caps = Capabilities::default(); // xterm: ModifyOtherKeys
+        let mut modes = ModeState::default();
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Char('c'), Mods::CTRL), &modes, &caps),
+            b"\x03"
+        );
+        modes.modify_other_keys = 2;
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Char('c'), Mods::CTRL), &modes, &caps),
+            b"\x1b[27;5;99~"
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Enter, Mods::CTRL), &modes, &caps),
+            b"\x1b[27;5;13~"
+        );
+        // plain and shift-only keys are untouched
+        assert_eq!(
+            encode_key(&KeyEvent::new(Key::Char('c')), &modes, &caps),
+            b"c"
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Char('C'), Mods::SHIFT), &modes, &caps),
+            b"C"
+        );
+        // legacy-only terminals never use it
+        let vt = Capabilities {
+            keyboard: KeyboardProtocol::Legacy,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            encode_key(&KeyEvent::with(Key::Char('c'), Mods::CTRL), &modes, &vt),
+            b"\x03"
+        );
     }
 }

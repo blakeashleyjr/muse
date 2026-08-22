@@ -48,13 +48,48 @@ Requires Rust 1.90+. Unix PTYs are first-class; Windows ConPTY is a P2 target.
 
 | command | description |
 |---|---|
-| `muse run <spec.yaml>…` | Run matrix-expanded test specs. `--profile`, `--size`, `--reporter pretty\|junit\|json`, `--retries`, `--shard i/n`, `--grep`, `--update-snapshots`. |
+| `muse run <spec.yaml>…` | Run matrix-expanded test specs. `--profile`, `--size`, `--reporter pretty\|junit\|json`, `--retries`, `--shard i/n`, `--grep`, `--update-snapshots`, `--ci` (a missing baseline fails), `--artifacts dir`, `--trace on\|retain-on-failure\|off`, `--case-timeout-ms`. |
+| `muse session …` | Drive a program interactively across commands: `open`, `send`, `resize`, `snap`, `screen`, `wait`, `logs`, `trace`, `list`, `close`, `export-spec`. See below. |
+| `muse serve` | The session daemon (started on demand by `session open`; `--stop` ends it). |
+| `muse mcp` | The session verbs as MCP tools on stdio, for agent hosts (`claude mcp add muse -- muse mcp`). |
 | `muse exec -- <argv>` | Spawn a program, settle, dump a snapshot (`--kind text\|styled\|pixel`, `--out file.png`). |
 | `muse trace <dir>` | Inspect a recorded trace; `--frame N` renders one frame. |
 | `muse doctor` | Diagnostics + self-test (font fingerprint, shells, profiles, spawn-and-assert). |
 | `muse profiles` | List built-in emulation profiles and capabilities. |
-| `muse conformance <dir>` | Run emulator + protocol conformance corpora. |
-| `muse codegen` | How the language SDK bases are generated. |
+| `muse conformance <dir>` | Run emulator + protocol conformance corpora (recursively). |
+| `muse codegen` | How the language SDK bases would be generated (no SDKs ship yet). |
+
+`--config file` / `$MUSE_CONFIG` / `./muse.toml` supply defaults (see
+`muse.toml`); `MUSE_*` env overrides the file; flags override both.
+`MUSE_LOG=debug` turns on tracing to stderr.
+
+## Interactive sessions (the agent loop)
+
+A session keeps a program alive in a PTY between commands — look, act,
+look again — which is how an agent checks its own work on a TUI:
+
+```sh
+muse session open --name app --size 120x40 -- ./my-tui     # prints an id
+muse session wait app --visible "Ready"                     # retries until seen; exit 1 if not
+muse session send app --key ctrl+p --text "query" --key enter
+muse session snap app                                       # settled screen as text
+muse session snap app --kind pixel --out shot.png           # or a PNG
+muse session logs app                                       # everything the program wrote
+muse session export-spec app --out test/app.yaml            # inputs + waits that held → a spec
+muse session close app
+```
+
+`wait` conditions: `--visible`, `--regex`, `--not-visible`, `--line N
+--contains/--equals`, `--count-min`, `--exit`. `send` takes `--text`,
+repeatable `--key` chords (`ctrl+c`, `alt+enter`, `f5`), `--paste`,
+`--bytes '\e[A'`, `--mouse '@row,col'`. Every verb accepts `--json`.
+Exit codes: 0 held, 1 did not hold, 2 muse/daemon error. The daemon
+exits when idle; `MUSE_SOCKET` isolates one.
+
+When a `muse run` case fails it keeps `test-results/<case>/` with
+`final.txt`, `final.png`, `final.json` (cursor/modes), per-snapshot
+`*.actual`/`*.diff`/`*.baseline` files, `result.json`, and a `trace/`
+directory (asciinema casts, every stable frame, steps with assertions).
 
 ## Test spec format
 
@@ -71,16 +106,26 @@ steps:
   - snapshot: {name: after_login, kind: text}
 ```
 
-Steps: `write`, `paste`, `key {key, mods}`, `resize "WxH"`, `sleep_ms`,
-`expect_visible`, `expect_text {…, equals}`, `expect_contains {…, contains}`,
-`snapshot {name, kind, masks, normalize, scale}`.
+Steps: `write`, `write_line`, `paste`, `key {key, mods}`,
+`mouse {row, col, button, action, mods}`, `resize "WxH"`, `sleep_ms`,
+`begin_step "name"`, `expect_visible`, `expect_not_visible`,
+`expect_text {…, equals}`, `expect_contains {…, contains}`,
+`expect_count {…, eq|min|max}`, `expect_style {…, bold|fg|bg|…}`,
+`expect_exit {code, timeout_ms}`, `snapshot {name, kind, masks, normalize, scale}`,
+`check_file {path, reject_re}`, `watch_log {path, reject_re}`.
+
+Spec-level keys: `matrix {profiles, sizes}`, `env`, `case_tmp_env` (a fresh
+per-case directory exported as that variable and available as `{case_tmp}`),
+`snapshot_defaults`, `sync {quiet_window_ms, max_settle_ms}`.
 
 Locators (used by `expect_*` and snapshots): `text`, `regex`, `line`, `cell`,
-`region`, `cursor`, with `ignore_case` / `whole_line` / `multiline` flags.
+`region`, `cursor`, with `ignore_case` / `whole_line` / `multiline` flags and a
+per-step `timeout_ms`.
 
 Snapshots are stored at
 `snapshots/{spec}__{name}/{profile}__{cols}x{rows}__{os}.{txt|png}`; a missing
-baseline is created and passes on first run; `--update-snapshots` overwrites.
+baseline is created and passes on first run (fails under `--ci`);
+`--update-snapshots` overwrites.
 
 ## Architecture (crate DAG)
 
@@ -130,11 +175,14 @@ recorder, the async PTY layer, the Terminal actor + synchronizer + web-first
 assertions, the matrix runner with reporters, the conformance harness, and the
 `muse` CLI.
 
+Also built: the session daemon + `muse session` CLI + `muse mcp` server
+(NDJSON over a unix socket; the `proto/` gRPC definition is not used by it).
+
 Documented but not built in this distribution (require external toolchains or
-are P2 in the spec): the live gRPC/Connect server and generated multi-language
+are P2 in the spec): the gRPC/Connect server and generated multi-language
 SDKs (`proto/` + `buf.gen.yaml` are provided), the C-ABI FFI for non-Rust
-embedding, remote/SSH PTY transport, and the differential mode against real
-`xterm`/`kitty` under Xvfb.
+embedding, remote/SSH PTY transport, the differential mode against real
+`xterm`/`kitty` under Xvfb, and DCS passthrough (sixel / kitty graphics).
 
 ## License
 

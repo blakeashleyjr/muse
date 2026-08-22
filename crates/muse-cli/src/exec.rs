@@ -12,6 +12,7 @@ pub struct ExecOpts {
     pub rows: u16,
     pub kind: SnapshotKind,
     pub deadline_ms: u64,
+    pub sync: SyncConfig,
 }
 
 /// Spawn `argv`, settle, and return the snapshot.
@@ -27,7 +28,7 @@ pub async fn exec(argv: Vec<String>, opts: &ExecOpts) -> Result<Snapshot> {
         argv,
         HashMap::new(),
         None,
-        SyncConfig::default(),
+        opts.sync.clone(),
     )?;
     let snap = handle.snapshot(opts.kind, 1, opts.deadline_ms).await;
     handle.shutdown().await.ok();
@@ -66,6 +67,7 @@ mod tests {
             rows: 10,
             kind,
             deadline_ms: 2000,
+            sync: SyncConfig::default(),
         }
     }
 

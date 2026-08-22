@@ -3,7 +3,7 @@
 use muse_core::color::Color;
 use muse_core::error::{Error, Result};
 use muse_core::grid::Rect;
-use muse_core::input::{Key, KeyEvent, Mods};
+use muse_core::input::{Key, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent};
 use muse_core::locator::Locator;
 use muse_core::snapshot::SnapshotKind;
 use muse_diff::normalize::{MaskRule, NormalizeRule};
@@ -106,7 +106,8 @@ pub struct KeySpec {
 impl KeySpec {
     pub fn to_event(&self) -> Result<KeyEvent> {
         let key = match self.key.as_str() {
-            "enter" => Key::Enter,
+            "enter" | "return" => Key::Enter,
+            "space" => Key::Char(' '),
             "tab" => Key::Tab,
             "backspace" => Key::Backspace,
             "escape" | "esc" => Key::Escape,
@@ -126,17 +127,58 @@ impl KeySpec {
             s if s.chars().count() == 1 => Key::Char(s.chars().next().unwrap()),
             other => return Err(Error::BadArgument(format!("unknown key `{other}`"))),
         };
-        let mut mods = Mods::empty();
-        for m in &self.mods {
-            match m.to_lowercase().as_str() {
-                "ctrl" | "control" => mods |= Mods::CTRL,
-                "alt" | "meta" => mods |= Mods::ALT,
-                "shift" => mods |= Mods::SHIFT,
-                "super" | "cmd" => mods |= Mods::SUPER,
-                other => return Err(Error::BadArgument(format!("unknown mod `{other}`"))),
-            }
+        Ok(KeyEvent::with(key, parse_mods(&self.mods)?))
+    }
+}
+
+/// Parse modifier names (`ctrl`/`control`, `alt`/`meta`, `shift`, `super`/`cmd`).
+pub fn parse_mods(names: &[String]) -> Result<Mods> {
+    let mut mods = Mods::empty();
+    for m in names {
+        match m.to_lowercase().as_str() {
+            "ctrl" | "control" => mods |= Mods::CTRL,
+            "alt" | "meta" => mods |= Mods::ALT,
+            "shift" => mods |= Mods::SHIFT,
+            "super" | "cmd" => mods |= Mods::SUPER,
+            other => return Err(Error::BadArgument(format!("unknown mod `{other}`"))),
         }
-        Ok(KeyEvent::with(key, mods))
+    }
+    Ok(mods)
+}
+
+impl MouseSpec {
+    /// Build the event; unknown buttons/actions/mods are errors, not silently
+    /// coerced to left-press.
+    pub fn to_event(&self) -> Result<MouseEvent> {
+        let button = match self.button.to_lowercase().as_str() {
+            "left" => MouseButton::Left,
+            "right" => MouseButton::Right,
+            "middle" => MouseButton::Middle,
+            "wheel_up" | "wheelup" => MouseButton::WheelUp,
+            "wheel_down" | "wheeldown" => MouseButton::WheelDown,
+            other => {
+                return Err(Error::BadArgument(format!(
+                    "unknown mouse button `{other}`"
+                )))
+            }
+        };
+        let action = match self.action.to_lowercase().as_str() {
+            "press" => MouseAction::Press,
+            "release" => MouseAction::Release,
+            "move" => MouseAction::Move,
+            other => {
+                return Err(Error::BadArgument(format!(
+                    "unknown mouse action `{other}`"
+                )))
+            }
+        };
+        Ok(MouseEvent {
+            button,
+            action,
+            row: self.row,
+            col: self.col,
+            mods: parse_mods(&self.mods)?,
+        })
     }
 }
 
@@ -883,6 +925,35 @@ steps:
             assert_eq!(c.max, Some(5));
         } else {
             panic!("not ExpectCount")
+        }
+    }
+
+    #[test]
+    fn mouse_spec_rejects_unknown_button_action_mod() {
+        let ok = MouseSpec {
+            row: 1,
+            col: 2,
+            button: "Right".into(),
+            action: "release".into(),
+            mods: vec!["ctrl".into()],
+        };
+        let ev = ok.to_event().unwrap();
+        assert_eq!(ev.button, MouseButton::Right);
+        assert_eq!(ev.action, MouseAction::Release);
+        assert!(ev.mods.contains(Mods::CTRL));
+        for (b, a, m) in [
+            ("lft", "press", ""),
+            ("left", "click", ""),
+            ("left", "press", "hyper"),
+        ] {
+            let bad = MouseSpec {
+                row: 0,
+                col: 0,
+                button: b.into(),
+                action: a.into(),
+                mods: if m.is_empty() { vec![] } else { vec![m.into()] },
+            };
+            assert!(bad.to_event().is_err(), "{b}/{a}/{m}");
         }
     }
 }

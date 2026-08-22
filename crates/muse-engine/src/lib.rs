@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use assert::AssertOutcome;
 pub use context::{build_env, resolve_profile, Context, Session};
 pub use sync::{SyncState, Synchronizer};
-pub use terminal::{FrameEvent, TermCmd, Terminal, TerminalHandle};
+pub use terminal::{FrameEvent, TermCmd, Terminal, TerminalHandle, TerminalInfo};
 
 /// Top-level manager holding sessions (§14: SessionManager → Session → Context).
 pub struct Engine {
@@ -316,6 +316,112 @@ mod tests {
         let h = handle(&["sleep", "10"]).unwrap();
         drop(h);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    /// Regression: output that arrives after a settled frame, with no input
+    /// from us in between, must be visible to a retrying assertion.
+    #[tokio::test]
+    async fn spontaneous_output_after_settle_is_seen() {
+        let h = handle(&["sh", "-c", "echo first; sleep 0.4; echo LATE; exec cat"]).unwrap();
+        let m = h
+            .resolve(
+                Locator::Text {
+                    pattern: "first".into(),
+                    ignore_case: false,
+                    whole_line: false,
+                },
+                false,
+                3000,
+            )
+            .await
+            .unwrap();
+        assert!(!m.is_empty());
+        // no write/key here — the SUT repaints on its own
+        let t0 = std::time::Instant::now();
+        let m = h
+            .resolve(
+                Locator::Text {
+                    pattern: "LATE".into(),
+                    ignore_case: false,
+                    whole_line: false,
+                },
+                false,
+                5000,
+            )
+            .await
+            .unwrap();
+        assert!(!m.is_empty(), "late output never produced a frame");
+        // must resolve from a fresh stable frame (~0.4s + quiet window), not
+        // fall through to the best-effort deadline
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(2500),
+            "resolved only at the deadline: {:?}",
+            t0.elapsed()
+        );
+        h.shutdown().await.unwrap();
+    }
+
+    /// Regression: a program that takes a moment to paint must not be
+    /// snapshotted as an empty screen.
+    #[tokio::test]
+    async fn late_first_output_not_settled_empty() {
+        let h = handle(&["sh", "-c", "sleep 0.3; echo late; exec cat"]).unwrap();
+        let snap = h.snapshot(SnapshotKind::Text, 1, 3000).await.unwrap();
+        let text = match snap {
+            Snapshot::Text(t) => t,
+            _ => panic!("text"),
+        };
+        assert!(text.contains("late"), "blank snapshot: {text:?}");
+        h.shutdown().await.unwrap();
+    }
+
+    /// Regression: shutdown stops the SUT's helpers too (process group), and
+    /// reaps the child.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_process_group() {
+        let h = handle(&["sh", "-c", "sleep 100 & echo PID=$!; wait"]).unwrap();
+        let m = h
+            .resolve(
+                Locator::Regex {
+                    re: "PID=[0-9]+".into(),
+                },
+                false,
+                3000,
+            )
+            .await
+            .unwrap();
+        let pid: i32 = m[0].text.trim_start_matches("PID=").trim().parse().unwrap();
+        let info = h.info().await.unwrap();
+        assert!(info.pid.is_some());
+        assert!(info.exit_code.is_none());
+        h.shutdown().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // SAFETY: signal 0 only probes existence
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "background helper {pid} outlived shutdown");
+    }
+
+    #[tokio::test]
+    async fn screen_and_info_commands() {
+        let h = handle(&["sh", "-c", "echo hello; exec cat"]).unwrap();
+        h.resolve(
+            Locator::Text {
+                pattern: "hello".into(),
+                ignore_case: false,
+                whole_line: false,
+            },
+            false,
+            3000,
+        )
+        .await
+        .unwrap();
+        let (screen, generation) = h.screen().await.unwrap();
+        assert!(generation >= 1);
+        assert_eq!(screen.active_grid().cols(), 40);
+        let info = h.info().await.unwrap();
+        assert!(!info.eof);
+        h.shutdown().await.unwrap();
     }
 
     #[tokio::test]
