@@ -67,7 +67,8 @@ pub enum TermCmd {
     Screen(oneshot::Sender<(Screen, u64)>),
     /// Process facts: pid, exit code (if exited), whether output hit EOF.
     Info(oneshot::Sender<TerminalInfo>),
-    Shutdown,
+    /// Stop the SUT and end the actor; the reply fires once that's done.
+    Shutdown(Option<oneshot::Sender<()>>),
 }
 
 /// Facts about the SUT process behind a terminal.
@@ -115,6 +116,8 @@ pub struct Terminal {
     /// `max_settle_ms` has elapsed) an empty screen is never declared stable,
     /// so a slow-starting program can't be snapshotted blank.
     first_output_seen: bool,
+    /// Who to tell when a requested shutdown has fully completed.
+    shutdown_ack: Option<oneshot::Sender<()>>,
 }
 
 /// How long `Shutdown` / handle-drop waits for the SUT to exit after SIGTERM
@@ -412,7 +415,8 @@ impl Terminal {
                     generation: self.generation,
                 });
             }
-            TermCmd::Shutdown => {
+            TermCmd::Shutdown(ack) => {
+                self.shutdown_ack = ack;
                 return false;
             }
         }
@@ -479,6 +483,9 @@ impl Terminal {
                             if !self.handle_cmd(c) {
                                 self.terminate();
                                 self.finalize(true);
+                                if let Some(ack) = self.shutdown_ack.take() {
+                                    let _ = ack.send(());
+                                }
                                 break;
                             }
                         }
@@ -556,6 +563,7 @@ impl TerminalHandle {
             exit_code: None,
             exit_waiters: Vec::new(),
             first_output_seen: false,
+            shutdown_ack: None,
         };
         tokio::spawn(term.run());
         TerminalHandle { cmd_tx, events }
@@ -636,8 +644,15 @@ impl TerminalHandle {
             .map_err(|_| Error::TerminalCrashed("actor closed".into()))?
     }
 
+    /// Stop the SUT (process group) and end the actor, returning once the
+    /// trace is flushed and the child reaped — so a caller that exits right
+    /// after (the session daemon) leaves nothing behind.
     pub async fn shutdown(&self) -> Result<()> {
-        self.send(TermCmd::Shutdown).await
+        let (tx, rx) = oneshot::channel();
+        self.send(TermCmd::Shutdown(Some(tx))).await?;
+        // Best effort: a wedged terminate still returns after the grace.
+        let _ = tokio::time::timeout(Duration::from_secs(3), rx).await;
+        Ok(())
     }
 
     /// The live screen right now, without waiting for stability, plus the
