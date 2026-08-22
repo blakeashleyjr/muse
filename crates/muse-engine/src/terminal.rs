@@ -49,6 +49,8 @@ pub enum TermCmd {
     SetProfile(Box<Profile>),
     StartTrace(Box<(PathBuf, TraceMeta)>),
     ExportTrace(oneshot::Sender<Result<PathBuf>>),
+    /// Drop the recorder without flushing (nothing will be written).
+    DiscardTrace,
     /// Wait for the SUT process to exit (or until deadline).
     /// Replies with the exit code, or `None` on timeout.
     WaitExit {
@@ -383,6 +385,10 @@ impl Terminal {
                 };
                 let _ = tx.send(res);
             }
+            TermCmd::DiscardTrace => {
+                self.recorder = None;
+                self.trace_dir = None;
+            }
             TermCmd::WaitExit { deadline, tx } => {
                 if let Some(code) = self.exit_code {
                     let _ = tx.send(Some(code));
@@ -615,6 +621,12 @@ impl TerminalHandle {
 
     pub async fn start_trace(&self, dir: PathBuf, meta: TraceMeta) -> Result<()> {
         self.send(TermCmd::StartTrace(Box::new((dir, meta)))).await
+    }
+
+    /// Forget the trace without writing it (a passing case that keeps
+    /// nothing). Must precede `shutdown`, whose finalize would flush it.
+    pub async fn discard_trace(&self) -> Result<()> {
+        self.send(TermCmd::DiscardTrace).await
     }
 
     pub async fn export_trace(&self) -> Result<PathBuf> {

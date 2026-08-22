@@ -278,6 +278,9 @@ pub async fn run_case(
             write_final_artifacts(&handle, dir, &result).await;
             result.artifacts = Some(dir.to_string_lossy().into_owned());
         } else {
+            // The actor's shutdown flushes an active trace — discard it first
+            // or the flush recreates `trace/` after this removal.
+            let _ = handle.discard_trace().await;
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -756,6 +759,8 @@ mod tests {
         let r = run_case(&spec, "xterm", 40, 10, &o).await;
         assert!(r.passed());
         assert!(r.artifacts.is_none());
+        // give the actor's shutdown a moment: nothing may reappear
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(!art.join("clean__xterm__40x10").exists());
         // trace=on keeps it
         let o = RunOpts {
