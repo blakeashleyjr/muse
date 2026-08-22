@@ -59,6 +59,9 @@ fn run_command_exit_code_on_failure() {
             "30x8",
             "--snapshots-dir",
             dir.path().join("s").to_str().unwrap(),
+            // keep the failure artifacts out of the crate directory
+            "--artifacts",
+            dir.path().join("results").to_str().unwrap(),
             "--deadline-ms",
             "300",
         ])
