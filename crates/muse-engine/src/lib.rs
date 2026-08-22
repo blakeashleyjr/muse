@@ -271,6 +271,11 @@ mod tests {
         )
         .await
         .unwrap();
+        // Subscribed after start_trace, so any frame seen here is one the
+        // recorder has already taken (`emit_stable` records before it
+        // publishes). Awaiting one makes "a frame was traced" a fact rather
+        // than a race against the quiet window.
+        let mut frames = h.subscribe();
         h.write(&b"traced-write\n"[..]).await.unwrap();
         h.key(muse_core::input::KeyEvent::new(
             muse_core::input::Key::Char('k'),
@@ -289,6 +294,10 @@ mod tests {
         )
         .await
         .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
+            .await
+            .expect("no frame within 5s")
+            .expect("frame channel closed");
         let out = h.export_trace().await.unwrap();
         let t = muse_trace::Trace::load(&out).unwrap();
         assert!(!t.frames.is_empty());
